@@ -1,0 +1,16 @@
+[package]
+name = "oxideav-pbm"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-pbm"
+homepage = "https://github.com/OxideAV/oxideav-pbm"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust Netpbm (PBM/PGM/PPM/PNM/PAM) image codec for the oxideav framework"
+readme = "README.md"
+keywords = ["multimedia", "image", "netpbm", "codec", "pure-rust"]
+categories = ["multimedia::encoding", "multimedia::images"]
+
+[dependencies]
+oxideav-core = "0.1"
