@@ -223,7 +223,7 @@ fn pam_round_trip_blackandwhite() {
     let w = 8u32;
     let h = 1u32;
     let row_bytes = (w as usize).div_ceil(8);
-    let bits = vec![0b1010_1100u8]; // bits as in P4 (1 = black)
+    let bits = [0b1010_1100u8]; // bits as in P4 (1 = black)
     let mut bw_samples = Vec::new();
     for x in 0..w as usize {
         let bit = (bits[0] >> (7 - x)) & 1;

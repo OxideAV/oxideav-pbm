@@ -134,8 +134,8 @@ fn samples_to_plane(h: &Header, s: &DecodedSamples) -> Result<(VideoPlane, Pixel
         PixelFormat::Gray8 => {
             let stride = w;
             let mut data = vec![0u8; stride * hh];
-            for i in 0..(w * hh) {
-                data[i] = scale_to_u8(s.samples[i], h.maxval);
+            for (i, byte) in data.iter_mut().enumerate().take(w * hh) {
+                *byte = scale_to_u8(s.samples[i], h.maxval);
             }
             Ok((VideoPlane { stride, data }, format))
         }
