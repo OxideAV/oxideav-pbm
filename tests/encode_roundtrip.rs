@@ -1,12 +1,11 @@
 //! End-to-end encode → decode roundtrip across every supported
 //! Netpbm output format.
 
-use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pbm::{decode_pbm, encode_pbm, encode_pbm_ascii};
+use oxideav_pbm::{decode_pbm, encode_pbm, encode_pbm_ascii, PbmImage, PbmPixelFormat, PbmPlane};
 
 /// Build a deterministic test pattern with `bytes_per_pixel` samples
 /// per pixel.
-fn pattern(w: u32, h: u32, bpp: usize) -> VideoFrame {
+fn pattern(w: u32, h: u32, bpp: usize, format: PbmPixelFormat) -> PbmImage {
     let mut data = Vec::with_capacity((w * h) as usize * bpp);
     for y in 0..h {
         for x in 0..w {
@@ -15,12 +14,15 @@ fn pattern(w: u32, h: u32, bpp: usize) -> VideoFrame {
             }
         }
     }
-    VideoFrame {
-        pts: None,
-        planes: vec![VideoPlane {
+    PbmImage {
+        width: w,
+        height: h,
+        pixel_format: format,
+        planes: vec![PbmPlane {
             stride: w as usize * bpp,
             data,
         }],
+        pts: None,
     }
 }
 
@@ -38,17 +40,20 @@ fn roundtrip_p4_monoblack() {
             }
         }
     }
-    let src = VideoFrame {
-        pts: None,
-        planes: vec![VideoPlane {
+    let src = PbmImage {
+        width: w,
+        height: h,
+        pixel_format: PbmPixelFormat::MonoBlack,
+        planes: vec![PbmPlane {
             stride: row_bytes,
             data: data.clone(),
         }],
+        pts: None,
     };
-    let bytes = encode_pbm(&src, PixelFormat::MonoBlack, w, h).unwrap();
+    let bytes = encode_pbm(&src).unwrap();
     assert!(bytes.starts_with(b"P4\n"));
     let (back, fmt) = decode_pbm(&bytes).unwrap();
-    assert_eq!(fmt, PixelFormat::MonoBlack);
+    assert_eq!(fmt, PbmPixelFormat::MonoBlack);
     // Check just the populated bits — padding bits in the last byte of
     // each row are unspecified (the encoder zeros them, but the
     // decoder might not — tolerate either by comparing per-pixel).
@@ -63,11 +68,11 @@ fn roundtrip_p4_monoblack() {
 
 #[test]
 fn roundtrip_p5_gray8() {
-    let src = pattern(20, 13, 1);
-    let bytes = encode_pbm(&src, PixelFormat::Gray8, 20, 13).unwrap();
+    let src = pattern(20, 13, 1, PbmPixelFormat::Gray8);
+    let bytes = encode_pbm(&src).unwrap();
     assert!(bytes.starts_with(b"P5\n"));
     let (back, fmt) = decode_pbm(&bytes).unwrap();
-    assert_eq!(fmt, PixelFormat::Gray8);
+    assert_eq!(fmt, PbmPixelFormat::Gray8);
     assert_eq!(back.planes[0].data, src.planes[0].data);
 }
 
@@ -83,28 +88,31 @@ fn roundtrip_p5_gray16() {
             data.extend_from_slice(&v.to_le_bytes());
         }
     }
-    let src = VideoFrame {
-        pts: None,
-        planes: vec![VideoPlane {
+    let src = PbmImage {
+        width: w,
+        height: h,
+        pixel_format: PbmPixelFormat::Gray16Le,
+        planes: vec![PbmPlane {
             stride: w as usize * 2,
             data,
         }],
+        pts: None,
     };
-    let bytes = encode_pbm(&src, PixelFormat::Gray16Le, w, h).unwrap();
+    let bytes = encode_pbm(&src).unwrap();
     assert!(bytes.starts_with(b"P5\n"));
     assert!(bytes.windows(5).any(|w| w == b"65535"));
     let (back, fmt) = decode_pbm(&bytes).unwrap();
-    assert_eq!(fmt, PixelFormat::Gray16Le);
+    assert_eq!(fmt, PbmPixelFormat::Gray16Le);
     assert_eq!(back.planes[0].data, src.planes[0].data);
 }
 
 #[test]
 fn roundtrip_p6_rgb8() {
-    let src = pattern(16, 12, 3);
-    let bytes = encode_pbm(&src, PixelFormat::Rgb24, 16, 12).unwrap();
+    let src = pattern(16, 12, 3, PbmPixelFormat::Rgb24);
+    let bytes = encode_pbm(&src).unwrap();
     assert!(bytes.starts_with(b"P6\n"));
     let (back, fmt) = decode_pbm(&bytes).unwrap();
-    assert_eq!(fmt, PixelFormat::Rgb24);
+    assert_eq!(fmt, PbmPixelFormat::Rgb24);
     assert_eq!(back.planes[0].data, src.planes[0].data);
 }
 
@@ -121,24 +129,27 @@ fn roundtrip_p6_rgb16() {
             }
         }
     }
-    let src = VideoFrame {
-        pts: None,
-        planes: vec![VideoPlane {
+    let src = PbmImage {
+        width: w,
+        height: h,
+        pixel_format: PbmPixelFormat::Rgb48Le,
+        planes: vec![PbmPlane {
             stride: w as usize * 6,
             data,
         }],
+        pts: None,
     };
-    let bytes = encode_pbm(&src, PixelFormat::Rgb48Le, w, h).unwrap();
+    let bytes = encode_pbm(&src).unwrap();
     assert!(bytes.starts_with(b"P6\n"));
     let (back, fmt) = decode_pbm(&bytes).unwrap();
-    assert_eq!(fmt, PixelFormat::Rgb48Le);
+    assert_eq!(fmt, PbmPixelFormat::Rgb48Le);
     assert_eq!(back.planes[0].data, src.planes[0].data);
 }
 
 #[test]
 fn roundtrip_p7_rgba() {
-    let src = pattern(7, 9, 4);
-    let bytes = encode_pbm(&src, PixelFormat::Rgba, 7, 9).unwrap();
+    let src = pattern(7, 9, 4, PbmPixelFormat::Rgba);
+    let bytes = encode_pbm(&src).unwrap();
     assert!(bytes.starts_with(b"P7\n"));
     let header_end = bytes
         .windows(8)
@@ -146,7 +157,7 @@ fn roundtrip_p7_rgba() {
         .unwrap_or(0);
     let _ = header_end;
     let (back, fmt) = decode_pbm(&bytes).unwrap();
-    assert_eq!(fmt, PixelFormat::Rgba);
+    assert_eq!(fmt, PbmPixelFormat::Rgba);
     assert_eq!(back.planes[0].data, src.planes[0].data);
 }
 
@@ -163,56 +174,59 @@ fn roundtrip_p7_rgba16() {
             }
         }
     }
-    let src = VideoFrame {
-        pts: None,
-        planes: vec![VideoPlane {
+    let src = PbmImage {
+        width: w,
+        height: h,
+        pixel_format: PbmPixelFormat::Rgba64Le,
+        planes: vec![PbmPlane {
             stride: w as usize * 8,
             data,
         }],
+        pts: None,
     };
-    let bytes = encode_pbm(&src, PixelFormat::Rgba64Le, w, h).unwrap();
+    let bytes = encode_pbm(&src).unwrap();
     assert!(bytes.starts_with(b"P7\n"));
     let (back, fmt) = decode_pbm(&bytes).unwrap();
-    assert_eq!(fmt, PixelFormat::Rgba64Le);
+    assert_eq!(fmt, PbmPixelFormat::Rgba64Le);
     assert_eq!(back.planes[0].data, src.planes[0].data);
 }
 
 #[test]
 fn roundtrip_p7_ya8() {
-    let src = pattern(10, 6, 2);
-    let bytes = encode_pbm(&src, PixelFormat::Ya8, 10, 6).unwrap();
+    let src = pattern(10, 6, 2, PbmPixelFormat::Ya8);
+    let bytes = encode_pbm(&src).unwrap();
     assert!(bytes.starts_with(b"P7\n"));
     let (back, fmt) = decode_pbm(&bytes).unwrap();
-    assert_eq!(fmt, PixelFormat::Ya8);
+    assert_eq!(fmt, PbmPixelFormat::Ya8);
     assert_eq!(back.planes[0].data, src.planes[0].data);
 }
 
 #[test]
 fn ascii_p3_round_trip() {
-    let src = pattern(5, 4, 3);
-    let bytes = encode_pbm_ascii(&src, PixelFormat::Rgb24, 5, 4).unwrap();
+    let src = pattern(5, 4, 3, PbmPixelFormat::Rgb24);
+    let bytes = encode_pbm_ascii(&src).unwrap();
     assert!(bytes.starts_with(b"P3\n"));
     let (back, fmt) = decode_pbm(&bytes).unwrap();
-    assert_eq!(fmt, PixelFormat::Rgb24);
+    assert_eq!(fmt, PbmPixelFormat::Rgb24);
     assert_eq!(back.planes[0].data, src.planes[0].data);
 }
 
 #[test]
 fn ascii_p2_round_trip() {
-    let src = pattern(7, 3, 1);
-    let bytes = encode_pbm_ascii(&src, PixelFormat::Gray8, 7, 3).unwrap();
+    let src = pattern(7, 3, 1, PbmPixelFormat::Gray8);
+    let bytes = encode_pbm_ascii(&src).unwrap();
     assert!(bytes.starts_with(b"P2\n"));
     let (back, fmt) = decode_pbm(&bytes).unwrap();
-    assert_eq!(fmt, PixelFormat::Gray8);
+    assert_eq!(fmt, PbmPixelFormat::Gray8);
     assert_eq!(back.planes[0].data, src.planes[0].data);
 }
 
 #[test]
 fn header_comments_are_tolerated() {
     let buf = b"P3\n# created by GIMP\n2 1\n# maxval next\n255\n255 0 0 0 255 0\n";
-    let (frame, fmt) = decode_pbm(buf).unwrap();
-    assert_eq!(fmt, PixelFormat::Rgb24);
-    assert_eq!(frame.planes[0].data, [255, 0, 0, 0, 255, 0]);
+    let (image, fmt) = decode_pbm(buf).unwrap();
+    assert_eq!(fmt, PbmPixelFormat::Rgb24);
+    assert_eq!(image.planes[0].data, [255, 0, 0, 0, 255, 0]);
 }
 
 #[test]
@@ -236,10 +250,10 @@ fn pam_round_trip_blackandwhite() {
     buf.extend_from_slice(&bw_samples);
     let _ = (row_bytes, h);
 
-    let (frame, fmt) = decode_pbm(&buf).unwrap();
-    assert_eq!(fmt, PixelFormat::MonoBlack);
+    let (image, fmt) = decode_pbm(&buf).unwrap();
+    assert_eq!(fmt, PbmPixelFormat::MonoBlack);
     // After inversion, MonoBlack plane should hold the original P4 bits
     // exactly.
-    let plane_byte = frame.planes[0].data[0];
+    let plane_byte = image.planes[0].data[0];
     assert_eq!(plane_byte, 0b1010_1100);
 }

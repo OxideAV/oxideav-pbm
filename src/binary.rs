@@ -6,7 +6,7 @@
 //! but with `DEPTH` channels and one of six standard `TUPLTYPE`s
 //! describing how those channels map to a colour model.
 
-use oxideav_core::{Error, Result};
+use crate::error::{PbmError as Error, Result};
 
 use crate::header::{Header, Magic};
 

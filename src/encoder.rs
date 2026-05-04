@@ -1,8 +1,8 @@
 //! Netpbm encoder.
 //!
-//! Picks an output magic from the input [`PixelFormat`]:
+//! Picks an output magic from the input [`PbmPixelFormat`]:
 //!
-//! | PixelFormat        | Output |
+//! | PbmPixelFormat     | Output |
 //! |--------------------|--------|
 //! | `MonoBlack`        | P4     |
 //! | `Gray8`            | P5 (maxval 255) |
@@ -18,15 +18,19 @@
 //! requested via [`encode_pbm_ascii`] — the binary path is always
 //! preferred for size.
 
-use oxideav_core::Encoder;
-use oxideav_core::{
-    CodecId, CodecParameters, Error, Frame, Packet, PixelFormat, Result, TimeBase, VideoFrame,
-};
+use crate::error::{PbmError as Error, Result};
 
 use crate::ascii::encode_ascii_body;
 use crate::binary::encode_p4_body;
+use crate::image::{PbmImage, PbmPixelFormat, PbmPlane};
 
-pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
+#[cfg(feature = "registry")]
+use oxideav_core::Encoder;
+#[cfg(feature = "registry")]
+use oxideav_core::{CodecId, CodecParameters, Frame, Packet, TimeBase};
+
+#[cfg(feature = "registry")]
+pub fn make_encoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn Encoder>> {
     let mut out_params = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
     out_params.width = params.width;
     out_params.height = params.height;
@@ -39,6 +43,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     }))
 }
 
+#[cfg(feature = "registry")]
 struct PbmEncoder {
     codec_id: CodecId,
     out_params: CodecParameters,
@@ -46,6 +51,7 @@ struct PbmEncoder {
     eof: bool,
 }
 
+#[cfg(feature = "registry")]
 impl Encoder for PbmEncoder {
     fn codec_id(&self) -> &CodecId {
         &self.codec_id
@@ -53,27 +59,41 @@ impl Encoder for PbmEncoder {
     fn output_params(&self) -> &CodecParameters {
         &self.out_params
     }
-    fn send_frame(&mut self, frame: &Frame) -> Result<()> {
+    fn send_frame(&mut self, frame: &Frame) -> oxideav_core::Result<()> {
         let vf = match frame {
             Frame::Video(v) => v,
-            _ => return Err(Error::invalid("PBM encoder: expected video frame")),
+            _ => {
+                return Err(oxideav_core::Error::invalid(
+                    "PBM encoder: expected video frame",
+                ))
+            }
         };
         let format = self.out_params.pixel_format.ok_or_else(|| {
-            Error::invalid("PBM encoder: pixel_format missing in CodecParameters")
+            oxideav_core::Error::invalid("PBM encoder: pixel_format missing in CodecParameters")
         })?;
-        let width = self
-            .out_params
-            .width
-            .ok_or_else(|| Error::invalid("PBM encoder: width missing in CodecParameters"))?;
-        let height = self
-            .out_params
-            .height
-            .ok_or_else(|| Error::invalid("PBM encoder: height missing in CodecParameters"))?;
-        let bytes = encode_pbm(vf, format, width, height)?;
+        let width = self.out_params.width.ok_or_else(|| {
+            oxideav_core::Error::invalid("PBM encoder: width missing in CodecParameters")
+        })?;
+        let height = self.out_params.height.ok_or_else(|| {
+            oxideav_core::Error::invalid("PBM encoder: height missing in CodecParameters")
+        })?;
+        let pbm_format = crate::registry::pixel_format_to_pbm(format).ok_or_else(|| {
+            oxideav_core::Error::invalid(format!(
+                "PBM encoder: pixel format {format:?} not representable as Netpbm"
+            ))
+        })?;
+        if vf.planes.is_empty() {
+            return Err(oxideav_core::Error::invalid("PBM encoder: empty plane"));
+        }
+        let plane = PbmPlane {
+            stride: vf.planes[0].stride,
+            data: vf.planes[0].data.clone(),
+        };
+        let bytes = encode_pbm_plane(&plane, pbm_format, width, height)?;
         self.pending = Some(bytes);
         Ok(())
     }
-    fn receive_packet(&mut self) -> Result<Packet> {
+    fn receive_packet(&mut self) -> oxideav_core::Result<Packet> {
         match self.pending.take() {
             Some(bytes) => {
                 let mut pkt = Packet::new(0, TimeBase::new(1, 1), bytes);
@@ -82,68 +102,89 @@ impl Encoder for PbmEncoder {
             }
             None => {
                 if self.eof {
-                    Err(Error::Eof)
+                    Err(oxideav_core::Error::Eof)
                 } else {
-                    Err(Error::NeedMore)
+                    Err(oxideav_core::Error::NeedMore)
                 }
             }
         }
     }
-    fn flush(&mut self) -> Result<()> {
+    fn flush(&mut self) -> oxideav_core::Result<()> {
         self.eof = true;
         Ok(())
     }
 }
 
-/// Encode a [`VideoFrame`] into the closest matching binary Netpbm
+/// Encode a [`PbmImage`] into the closest matching binary Netpbm
 /// variant.
-pub fn encode_pbm(
-    frame: &VideoFrame,
-    format: PixelFormat,
+pub fn encode_pbm(image: &PbmImage) -> Result<Vec<u8>> {
+    if image.planes.is_empty() {
+        return Err(Error::invalid("PBM encoder: empty plane"));
+    }
+    encode_pbm_plane(
+        &image.planes[0],
+        image.pixel_format,
+        image.width,
+        image.height,
+    )
+}
+
+/// Encode a single [`PbmPlane`] (width × height pixels in `format`)
+/// into a binary Netpbm file. Lower-level than [`encode_pbm`] for
+/// callers that already have plane bytes laid out without a wrapping
+/// [`PbmImage`].
+pub fn encode_pbm_plane(
+    plane: &PbmPlane,
+    format: PbmPixelFormat,
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>> {
     let w = width as usize;
     let h = height as usize;
-    if frame.planes.is_empty() {
-        return Err(Error::invalid("PBM encoder: empty plane"));
-    }
-    let plane = &frame.planes[0];
     if plane.data.len() < plane.stride * h {
         return Err(Error::invalid("PBM encoder: plane truncated"));
     }
     match format {
-        PixelFormat::MonoBlack => encode_p4(plane, w, h),
-        PixelFormat::Gray8 => encode_p5_gray8(plane, w, h),
-        PixelFormat::Gray16Le => encode_p5_gray16(plane, w, h),
-        PixelFormat::Rgb24 => encode_p6_rgb8(plane, w, h),
-        PixelFormat::Rgb48Le => encode_p6_rgb16(plane, w, h),
-        PixelFormat::Rgba => encode_p7_rgba8(plane, w, h),
-        PixelFormat::Bgra => encode_p7_bgra8(plane, w, h),
-        PixelFormat::Rgba64Le => encode_p7_rgba16(plane, w, h),
-        PixelFormat::Ya8 => encode_p7_ya8(plane, w, h),
-        other => Err(Error::unsupported(format!(
-            "PBM encoder: pixel format {other:?} not supported in round 1"
-        ))),
+        PbmPixelFormat::MonoBlack => encode_p4(plane, w, h),
+        PbmPixelFormat::Gray8 => encode_p5_gray8(plane, w, h),
+        PbmPixelFormat::Gray16Le => encode_p5_gray16(plane, w, h),
+        PbmPixelFormat::Rgb24 => encode_p6_rgb8(plane, w, h),
+        PbmPixelFormat::Rgb48Le => encode_p6_rgb16(plane, w, h),
+        PbmPixelFormat::Rgba => encode_p7_rgba8(plane, w, h),
+        PbmPixelFormat::Bgra => encode_p7_bgra8(plane, w, h),
+        PbmPixelFormat::Rgba64Le => encode_p7_rgba16(plane, w, h),
+        PbmPixelFormat::Ya8 => encode_p7_ya8(plane, w, h),
     }
 }
 
-/// ASCII variant: emit P1/P2/P3 by transcoding the binary output. Less
-/// efficient (≥ 3× larger on disk) but the man pages still document
-/// the plain forms and some tools require them.
-pub fn encode_pbm_ascii(
-    frame: &VideoFrame,
-    format: PixelFormat,
+/// ASCII variant: emit P1/P2/P3 from a [`PbmImage`]. Less efficient
+/// (≥ 3× larger on disk) but the man pages still document the plain
+/// forms and some tools require them.
+pub fn encode_pbm_ascii(image: &PbmImage) -> Result<Vec<u8>> {
+    if image.planes.is_empty() {
+        return Err(Error::invalid("PBM ASCII encoder: empty plane"));
+    }
+    encode_pbm_ascii_plane(
+        &image.planes[0],
+        image.pixel_format,
+        image.width,
+        image.height,
+    )
+}
+
+/// ASCII variant: emit P1/P2/P3 from a single plane.
+pub fn encode_pbm_ascii_plane(
+    plane: &PbmPlane,
+    format: PbmPixelFormat,
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>> {
     let w = width as usize;
     let h = height as usize;
-    let plane = &frame.planes[0];
     match format {
-        PixelFormat::MonoBlack => Ok(emit_ascii_pbm_header_and_body(plane, w, h)),
-        PixelFormat::Gray8 => Ok(emit_ascii_pgm_8(plane, w, h)),
-        PixelFormat::Rgb24 => Ok(emit_ascii_ppm_8(plane, w, h)),
+        PbmPixelFormat::MonoBlack => Ok(emit_ascii_pbm_header_and_body(plane, w, h)),
+        PbmPixelFormat::Gray8 => Ok(emit_ascii_pgm_8(plane, w, h)),
+        PbmPixelFormat::Rgb24 => Ok(emit_ascii_ppm_8(plane, w, h)),
         other => Err(Error::unsupported(format!(
             "PBM ASCII encoder: pixel format {other:?} not supported"
         ))),
@@ -166,7 +207,7 @@ fn header_pnm(magic: u8, w: usize, h: usize, maxval: Option<u32>) -> Vec<u8> {
     out
 }
 
-fn encode_p4(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Result<Vec<u8>> {
+fn encode_p4(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     // Input is `MonoBlack`: MSB-first packed bits, 1 = black, rows
     // padded to a byte. P4's wire format is identical, but we may have
     // an input stride larger than the spec's row_bytes — repack just
@@ -186,7 +227,7 @@ fn encode_p4(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Result<Vec
     Ok(out)
 }
 
-fn encode_p5_gray8(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Result<Vec<u8>> {
+fn encode_p5_gray8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     let mut out = header_pnm(b'5', w, h, Some(255));
     for y in 0..h {
         out.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w]);
@@ -194,7 +235,7 @@ fn encode_p5_gray8(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Resu
     Ok(out)
 }
 
-fn encode_p5_gray16(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Result<Vec<u8>> {
+fn encode_p5_gray16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     let mut out = header_pnm(b'5', w, h, Some(65535));
     for y in 0..h {
         let row = &plane.data[y * plane.stride..y * plane.stride + w * 2];
@@ -207,7 +248,7 @@ fn encode_p5_gray16(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Res
     Ok(out)
 }
 
-fn encode_p6_rgb8(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Result<Vec<u8>> {
+fn encode_p6_rgb8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     let mut out = header_pnm(b'6', w, h, Some(255));
     for y in 0..h {
         out.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w * 3]);
@@ -215,7 +256,7 @@ fn encode_p6_rgb8(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Resul
     Ok(out)
 }
 
-fn encode_p6_rgb16(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Result<Vec<u8>> {
+fn encode_p6_rgb16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     let mut out = header_pnm(b'6', w, h, Some(65535));
     for y in 0..h {
         let row = &plane.data[y * plane.stride..y * plane.stride + w * 6];
@@ -239,7 +280,7 @@ fn header_pam(w: usize, h: usize, depth: u32, maxval: u32, tupltype: &str) -> Ve
     out
 }
 
-fn encode_p7_rgba8(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Result<Vec<u8>> {
+fn encode_p7_rgba8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     let mut out = header_pam(w, h, 4, 255, "RGB_ALPHA");
     for y in 0..h {
         out.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w * 4]);
@@ -247,7 +288,7 @@ fn encode_p7_rgba8(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Resu
     Ok(out)
 }
 
-fn encode_p7_bgra8(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Result<Vec<u8>> {
+fn encode_p7_bgra8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     // Reorder BGRA → RGBA on the way out so the file declares RGB_ALPHA
     // and any decoder reads them back as such.
     let mut out = header_pam(w, h, 4, 255, "RGB_ALPHA");
@@ -263,7 +304,7 @@ fn encode_p7_bgra8(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Resu
     Ok(out)
 }
 
-fn encode_p7_rgba16(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Result<Vec<u8>> {
+fn encode_p7_rgba16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     let mut out = header_pam(w, h, 4, 65535, "RGB_ALPHA");
     for y in 0..h {
         let row = &plane.data[y * plane.stride..y * plane.stride + w * 8];
@@ -276,7 +317,7 @@ fn encode_p7_rgba16(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Res
     Ok(out)
 }
 
-fn encode_p7_ya8(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Result<Vec<u8>> {
+fn encode_p7_ya8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     let mut out = header_pam(w, h, 2, 255, "GRAYSCALE_ALPHA");
     for y in 0..h {
         out.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w * 2]);
@@ -288,7 +329,7 @@ fn encode_p7_ya8(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Result
 // ASCII writers (P1/P2/P3)
 // ---------------------------------------------------------------------------
 
-fn emit_ascii_pbm_header_and_body(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Vec<u8> {
+fn emit_ascii_pbm_header_and_body(plane: &PbmPlane, w: usize, h: usize) -> Vec<u8> {
     let row_bytes = w.div_ceil(8);
     let mut samples: Vec<u16> = Vec::with_capacity(w * h);
     for y in 0..h {
@@ -302,7 +343,7 @@ fn emit_ascii_pbm_header_and_body(plane: &oxideav_core::VideoPlane, w: usize, h:
     out
 }
 
-fn emit_ascii_pgm_8(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Vec<u8> {
+fn emit_ascii_pgm_8(plane: &PbmPlane, w: usize, h: usize) -> Vec<u8> {
     let mut samples: Vec<u16> = Vec::with_capacity(w * h);
     for y in 0..h {
         let row = &plane.data[y * plane.stride..y * plane.stride + w];
@@ -315,7 +356,7 @@ fn emit_ascii_pgm_8(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Vec
     out
 }
 
-fn emit_ascii_ppm_8(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Vec<u8> {
+fn emit_ascii_ppm_8(plane: &PbmPlane, w: usize, h: usize) -> Vec<u8> {
     let mut samples: Vec<u16> = Vec::with_capacity(w * h * 3);
     for y in 0..h {
         let row = &plane.data[y * plane.stride..y * plane.stride + w * 3];
@@ -331,19 +372,33 @@ fn emit_ascii_ppm_8(plane: &oxideav_core::VideoPlane, w: usize, h: usize) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxideav_core::{VideoFrame, VideoPlane};
+
+    fn make_image(
+        format: PbmPixelFormat,
+        w: u32,
+        h: u32,
+        stride: usize,
+        data: Vec<u8>,
+    ) -> PbmImage {
+        PbmImage {
+            width: w,
+            height: h,
+            pixel_format: format,
+            planes: vec![PbmPlane { stride, data }],
+            pts: None,
+        }
+    }
 
     #[test]
     fn encode_p6_rgb8_smoke() {
-        let plane = VideoPlane {
-            stride: 6,
-            data: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-        };
-        let vf = VideoFrame {
-            pts: None,
-            planes: vec![plane],
-        };
-        let bytes = encode_pbm(&vf, PixelFormat::Rgb24, 2, 2).unwrap();
+        let img = make_image(
+            PbmPixelFormat::Rgb24,
+            2,
+            2,
+            6,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        );
+        let bytes = encode_pbm(&img).unwrap();
         assert!(bytes.starts_with(b"P6\n2 2\n255\n"));
         let body = &bytes[bytes.iter().position(|&b| b == b'\n').unwrap() + 1..];
         let body = &body[body.iter().position(|&b| b == b'\n').unwrap() + 1..];
@@ -353,16 +408,15 @@ mod tests {
 
     #[test]
     fn encode_p5_gray16_swaps_to_be() {
-        let plane = VideoPlane {
-            stride: 4,
+        let img = make_image(
+            PbmPixelFormat::Gray16Le,
+            2,
+            1,
+            4,
             // LE input: 0x1234 then 0x5678
-            data: vec![0x34, 0x12, 0x78, 0x56],
-        };
-        let vf = VideoFrame {
-            pts: None,
-            planes: vec![plane],
-        };
-        let bytes = encode_pbm(&vf, PixelFormat::Gray16Le, 2, 1).unwrap();
+            vec![0x34, 0x12, 0x78, 0x56],
+        );
+        let bytes = encode_pbm(&img).unwrap();
         assert!(bytes.starts_with(b"P5\n2 1\n65535\n"));
         // Last 4 bytes = BE samples
         assert_eq!(&bytes[bytes.len() - 4..], &[0x12, 0x34, 0x56, 0x78]);
@@ -370,15 +424,8 @@ mod tests {
 
     #[test]
     fn encode_p7_rgba_emits_rgb_alpha_tupltype() {
-        let plane = VideoPlane {
-            stride: 4,
-            data: vec![10, 20, 30, 40],
-        };
-        let vf = VideoFrame {
-            pts: None,
-            planes: vec![plane],
-        };
-        let bytes = encode_pbm(&vf, PixelFormat::Rgba, 1, 1).unwrap();
+        let img = make_image(PbmPixelFormat::Rgba, 1, 1, 4, vec![10, 20, 30, 40]);
+        let bytes = encode_pbm(&img).unwrap();
         assert!(bytes.starts_with(b"P7\n"));
         let s = std::str::from_utf8(&bytes[..bytes.len() - 4]).unwrap();
         assert!(s.contains("TUPLTYPE RGB_ALPHA"));

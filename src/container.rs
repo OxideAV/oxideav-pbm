@@ -2,6 +2,10 @@
 //! stream `0`. Mirrors the same shape as `oxideav-bmp` /
 //! `oxideav-png` (non-APNG path) — Netpbm has no animation or
 //! multi-frame layout to worry about.
+//!
+//! Lives behind the `registry` feature: the container types are all
+//! defined by `oxideav-core`, so a standalone build (no framework dep)
+//! has nothing meaningful to expose here.
 
 use std::io::{Read, SeekFrom, Write};
 

@@ -15,76 +15,56 @@
 //! | P6    | PPM  | Binary   | 3 (RGB)    | 8 or 16 |
 //! | P7    | PAM  | Binary   | 1-4 (depth + tupltype) | 1-16 (arbitrary `MAXVAL`) |
 //!
-//! All seven magics decode to an `oxideav-core` [`VideoFrame`]; the
-//! encoder picks the closest binary form (P4/P5/P6/P7) for any
-//! supported [`PixelFormat`]. ASCII-form output is also available via
-//! [`encoder::encode_pbm_ascii`].
+//! All seven magics decode to a [`PbmImage`] tagged with one of the
+//! [`PbmPixelFormat`] variants; the encoder picks the closest binary
+//! form (P4/P5/P6/P7) for any supported pixel format. ASCII-form
+//! output is also available via [`encode_pbm_ascii`].
 //!
 //! Comments (`# … LF`) are tolerated everywhere the Netpbm spec
 //! permits them — in headers and in the bodies of P1/P2/P3 — and any
 //! ASCII whitespace separates header tokens / ASCII samples.
 //!
-//! The crate registers itself both as a codec (`pbm` codec id) and as
-//! a container (extensions `.pbm`, `.pgm`, `.ppm`, `.pnm`, `.pam`)
-//! since each Netpbm file is fully self-contained.
+//! ## Standalone vs registry-integrated
+//!
+//! The crate's default `registry` Cargo feature pulls in `oxideav-core`
+//! and exposes the framework `Decoder` / `Encoder` trait surface plus
+//! a [`registry::register`] entry point. Disable the feature
+//! (`default-features = false`) for an `oxideav-core`-free build that
+//! still exposes the standalone [`decode_pbm`] / [`encode_pbm`] /
+//! [`encode_pbm_ascii`] API.
 
 pub mod ascii;
 pub mod binary;
+#[cfg(feature = "registry")]
 pub mod container;
 pub mod decoder;
 pub mod encoder;
+pub mod error;
 pub mod header;
-
-use oxideav_core::ContainerRegistry;
-use oxideav_core::{CodecCapabilities, CodecId, PixelFormat};
-use oxideav_core::{CodecInfo, CodecRegistry};
+pub mod image;
+#[cfg(feature = "registry")]
+pub mod registry;
 
 /// Codec id for Netpbm image frames. All eight magics share this id —
 /// the body itself is self-describing.
 pub const CODEC_ID_STR: &str = "pbm";
 
-pub fn register_codecs(reg: &mut CodecRegistry) {
-    let caps = CodecCapabilities::video("pbm_sw")
-        .with_intra_only(true)
-        .with_lossless(true)
-        .with_max_size(65535, 65535)
-        .with_pixel_formats(vec![
-            PixelFormat::MonoBlack,
-            PixelFormat::Gray8,
-            PixelFormat::Gray16Le,
-            PixelFormat::Rgb24,
-            PixelFormat::Rgb48Le,
-            PixelFormat::Rgba,
-            PixelFormat::Rgba64Le,
-            PixelFormat::Ya8,
-        ]);
-    reg.register(
-        CodecInfo::new(CodecId::new(CODEC_ID_STR))
-            .capabilities(caps)
-            .decoder(decoder::make_decoder)
-            .encoder(encoder::make_encoder),
-    );
-}
-
-pub fn register_containers(reg: &mut ContainerRegistry) {
-    container::register(reg);
-}
-
-pub fn register(codecs: &mut CodecRegistry, containers: &mut ContainerRegistry) {
-    register_codecs(codecs);
-    register_containers(containers);
-}
-
 pub use decoder::decode_pbm;
-pub use encoder::{encode_pbm, encode_pbm_ascii};
+pub use encoder::{encode_pbm, encode_pbm_ascii, encode_pbm_ascii_plane, encode_pbm_plane};
+pub use error::{PbmError, Result};
 pub use header::{parse_header, Header, Magic, Tupltype};
+pub use image::{PbmImage, PbmPixelFormat, PbmPlane};
+
+#[cfg(feature = "registry")]
+pub use registry::{
+    pbm_to_pixel_format, pixel_format_to_pbm, register, register_codecs, register_containers,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
 
-    fn rgb_checker(w: u32, h: u32) -> VideoFrame {
+    fn rgb_checker(w: u32, h: u32) -> PbmImage {
         let mut data = Vec::with_capacity((w * h * 3) as usize);
         for y in 0..h {
             for x in 0..w {
@@ -93,22 +73,25 @@ mod tests {
                 data.extend_from_slice(&rgb);
             }
         }
-        VideoFrame {
-            pts: None,
-            planes: vec![VideoPlane {
+        PbmImage {
+            width: w,
+            height: h,
+            pixel_format: PbmPixelFormat::Rgb24,
+            planes: vec![PbmPlane {
                 stride: w as usize * 3,
                 data,
             }],
+            pts: None,
         }
     }
 
     #[test]
     fn p6_round_trip_pixel_exact() {
         let src = rgb_checker(16, 12);
-        let bytes = encode_pbm(&src, PixelFormat::Rgb24, 16, 12).unwrap();
+        let bytes = encode_pbm(&src).unwrap();
         assert!(bytes.starts_with(b"P6\n"));
         let (back, fmt) = decode_pbm(&bytes).unwrap();
-        assert_eq!(fmt, PixelFormat::Rgb24);
+        assert_eq!(fmt, PbmPixelFormat::Rgb24);
         assert_eq!(back.planes[0].data, src.planes[0].data);
     }
 
@@ -125,14 +108,17 @@ mod tests {
                 ]);
             }
         }
-        let src = VideoFrame {
+        let src = PbmImage {
+            width: 6,
+            height: 4,
+            pixel_format: PbmPixelFormat::Rgba,
+            planes: vec![PbmPlane { stride: 24, data }],
             pts: None,
-            planes: vec![VideoPlane { stride: 24, data }],
         };
-        let bytes = encode_pbm(&src, PixelFormat::Rgba, 6, 4).unwrap();
+        let bytes = encode_pbm(&src).unwrap();
         assert!(bytes.starts_with(b"P7\n"));
         let (back, fmt) = decode_pbm(&bytes).unwrap();
-        assert_eq!(fmt, PixelFormat::Rgba);
+        assert_eq!(fmt, PbmPixelFormat::Rgba);
         assert_eq!(back.planes[0].data, src.planes[0].data);
     }
 }

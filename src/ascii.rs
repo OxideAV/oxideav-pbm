@@ -11,7 +11,7 @@
 //! whole-number token of any length and treats each digit as a sample,
 //! or skips a whitespace byte and goes again.
 
-use oxideav_core::{Error, Result};
+use crate::error::{PbmError as Error, Result};
 
 use crate::binary::DecodedSamples;
 use crate::header::{Header, Magic};

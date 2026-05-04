@@ -1,37 +1,44 @@
-//! Netpbm decoder. Maps every variant onto an [`oxideav_core::VideoFrame`]
-//! using the closest matching [`PixelFormat`]:
+//! Netpbm decoder. Maps every variant onto a [`PbmImage`] tagged with
+//! the closest matching [`PbmPixelFormat`]:
 //!
-//! | Netpbm                  | PixelFormat |
-//! |-------------------------|-------------|
+//! | Netpbm                  | PbmPixelFormat |
+//! |-------------------------|----------------|
 //! | P1 / P4 (1-bit)         | `MonoBlack` (1 = black, MSB-first packed) |
-//! | P2 / P5 8-bit gray      | `Gray8`     |
-//! | P2 / P5 16-bit gray     | `Gray16Le`  |
-//! | P3 / P6 8-bit RGB       | `Rgb24`     |
-//! | P3 / P6 16-bit RGB      | `Rgb48Le`   |
-//! | P7 BLACKANDWHITE        | `MonoBlack` |
+//! | P2 / P5 8-bit gray      | `Gray8`        |
+//! | P2 / P5 16-bit gray     | `Gray16Le`     |
+//! | P3 / P6 8-bit RGB       | `Rgb24`        |
+//! | P3 / P6 16-bit RGB      | `Rgb48Le`      |
+//! | P7 BLACKANDWHITE        | `MonoBlack`    |
 //! | P7 GRAYSCALE 8/16       | `Gray8` / `Gray16Le` |
-//! | P7 RGB 8/16             | `Rgb24` / `Rgb48Le` |
-//! | P7 GRAYSCALE_ALPHA 8    | `Ya8`       |
-//! | P7 RGB_ALPHA 8          | `Rgba`      |
-//! | P7 RGB_ALPHA 16         | `Rgba64Le`  |
+//! | P7 RGB 8/16             | `Rgb24` / `Rgb48Le`  |
+//! | P7 GRAYSCALE_ALPHA 8    | `Ya8`          |
+//! | P7 RGB_ALPHA 8          | `Rgba`         |
+//! | P7 RGB_ALPHA 16         | `Rgba64Le`     |
 //!
 //! 16-bit grayscale-with-alpha and BLACKANDWHITE_ALPHA fall back to a
-//! 4-byte-per-pixel `Rgba` representation since `oxideav-core` doesn't
-//! ship a `Ya16` variant — the alpha channel is preserved either way.
+//! 4-byte-per-pixel `Rgba` representation since the workspace's pixel
+//! catalogue doesn't carry a `Ya16` variant — the alpha channel is
+//! preserved either way.
+//!
+//! With the default `registry` feature on, the gated `PbmDecoder` trait
+//! impl wraps [`decode_pbm`] for the `oxideav_core::Decoder` surface.
 
-use oxideav_core::Decoder;
-use oxideav_core::{
-    CodecId, CodecParameters, Error, Frame, Packet, PixelFormat, Result, TimeBase, VideoFrame,
-    VideoPlane,
-};
+use crate::error::{PbmError as Error, Result};
 
 use crate::ascii::decode_ascii;
 use crate::binary::{decode_binary, DecodedSamples};
 use crate::header::{parse_header, Header, Magic, Tupltype};
+use crate::image::{PbmImage, PbmPixelFormat, PbmPlane};
+
+#[cfg(feature = "registry")]
+use oxideav_core::Decoder;
+#[cfg(feature = "registry")]
+use oxideav_core::{CodecId, CodecParameters, Frame, Packet, VideoFrame, VideoPlane};
 
 /// Factory registered with the codec registry. One packet per whole
 /// Netpbm file; one frame per packet.
-pub fn make_decoder(_params: &CodecParameters) -> Result<Box<dyn Decoder>> {
+#[cfg(feature = "registry")]
+pub fn make_decoder(_params: &CodecParameters) -> oxideav_core::Result<Box<dyn Decoder>> {
     Ok(Box::new(PbmDecoder {
         codec_id: CodecId::new(crate::CODEC_ID_STR),
         pending: None,
@@ -39,42 +46,59 @@ pub fn make_decoder(_params: &CodecParameters) -> Result<Box<dyn Decoder>> {
     }))
 }
 
+#[cfg(feature = "registry")]
 struct PbmDecoder {
     codec_id: CodecId,
     pending: Option<VideoFrame>,
     eof: bool,
 }
 
+#[cfg(feature = "registry")]
 impl Decoder for PbmDecoder {
     fn codec_id(&self) -> &CodecId {
         &self.codec_id
     }
-    fn send_packet(&mut self, packet: &Packet) -> Result<()> {
-        let (frame, _fmt) = decode_pbm(&packet.data)?;
-        self.pending = Some(frame);
+    fn send_packet(&mut self, packet: &Packet) -> oxideav_core::Result<()> {
+        let (image, _fmt) = decode_pbm(&packet.data)?;
+        self.pending = Some(image_to_video_frame(image));
         Ok(())
     }
-    fn receive_frame(&mut self) -> Result<Frame> {
+    fn receive_frame(&mut self) -> oxideav_core::Result<Frame> {
         match self.pending.take() {
             Some(f) => Ok(Frame::Video(f)),
             None => {
                 if self.eof {
-                    Err(Error::Eof)
+                    Err(oxideav_core::Error::Eof)
                 } else {
-                    Err(Error::NeedMore)
+                    Err(oxideav_core::Error::NeedMore)
                 }
             }
         }
     }
-    fn flush(&mut self) -> Result<()> {
+    fn flush(&mut self) -> oxideav_core::Result<()> {
         self.eof = true;
         Ok(())
     }
 }
 
+#[cfg(feature = "registry")]
+fn image_to_video_frame(image: PbmImage) -> VideoFrame {
+    VideoFrame {
+        pts: image.pts,
+        planes: image
+            .planes
+            .into_iter()
+            .map(|p| VideoPlane {
+                stride: p.stride,
+                data: p.data,
+            })
+            .collect(),
+    }
+}
+
 /// Decode a complete Netpbm file (any of the seven magic numbers) into
-/// a [`VideoFrame`] plus the [`PixelFormat`] the frame matches.
-pub fn decode_pbm(input: &[u8]) -> Result<(VideoFrame, PixelFormat)> {
+/// a [`PbmImage`] plus the [`PbmPixelFormat`] the image carries.
+pub fn decode_pbm(input: &[u8]) -> Result<(PbmImage, PbmPixelFormat)> {
     let header = parse_header(input)?;
     let body = &input[header.data_offset..];
     let samples = if header.magic.is_ascii() {
@@ -83,20 +107,22 @@ pub fn decode_pbm(input: &[u8]) -> Result<(VideoFrame, PixelFormat)> {
         decode_binary(&header, body)?
     };
     let (plane, format) = samples_to_plane(&header, &samples)?;
-    let _ = TimeBase::new(1, 1);
     Ok((
-        VideoFrame {
-            pts: None,
+        PbmImage {
+            width: header.width,
+            height: header.height,
+            pixel_format: format,
             planes: vec![plane],
+            pts: None,
         },
         format,
     ))
 }
 
-/// Build a `(VideoPlane, PixelFormat)` from a freshly-decoded sample
-/// matrix. This is the place that picks which `oxideav-core` pixel
-/// format best represents each (magic, depth, maxval) combination.
-fn samples_to_plane(h: &Header, s: &DecodedSamples) -> Result<(VideoPlane, PixelFormat)> {
+/// Build a `(PbmPlane, PbmPixelFormat)` from a freshly-decoded sample
+/// matrix. This is the place that picks which [`PbmPixelFormat`] best
+/// represents each (magic, depth, maxval) combination.
+fn samples_to_plane(h: &Header, s: &DecodedSamples) -> Result<(PbmPlane, PbmPixelFormat)> {
     let w = h.width as usize;
     let hh = h.height as usize;
     let depth = h.depth as usize;
@@ -107,7 +133,7 @@ fn samples_to_plane(h: &Header, s: &DecodedSamples) -> Result<(VideoPlane, Pixel
     let _ = bps; // bits-per-sample is implicit in the chosen format
 
     match format {
-        PixelFormat::MonoBlack => {
+        PbmPixelFormat::MonoBlack => {
             // 1 bit per pixel, MSB-first packed, rows padded to byte
             // boundary.
             let stride = w.div_ceil(8);
@@ -129,17 +155,17 @@ fn samples_to_plane(h: &Header, s: &DecodedSamples) -> Result<(VideoPlane, Pixel
                     }
                 }
             }
-            Ok((VideoPlane { stride, data }, format))
+            Ok((PbmPlane { stride, data }, format))
         }
-        PixelFormat::Gray8 => {
+        PbmPixelFormat::Gray8 => {
             let stride = w;
             let mut data = vec![0u8; stride * hh];
             for (i, byte) in data.iter_mut().enumerate().take(w * hh) {
                 *byte = scale_to_u8(s.samples[i], h.maxval);
             }
-            Ok((VideoPlane { stride, data }, format))
+            Ok((PbmPlane { stride, data }, format))
         }
-        PixelFormat::Gray16Le => {
+        PbmPixelFormat::Gray16Le => {
             let stride = w * 2;
             let mut data = vec![0u8; stride * hh];
             for i in 0..(w * hh) {
@@ -147,9 +173,9 @@ fn samples_to_plane(h: &Header, s: &DecodedSamples) -> Result<(VideoPlane, Pixel
                 let off = i * 2;
                 data[off..off + 2].copy_from_slice(&v.to_le_bytes());
             }
-            Ok((VideoPlane { stride, data }, format))
+            Ok((PbmPlane { stride, data }, format))
         }
-        PixelFormat::Rgb24 => {
+        PbmPixelFormat::Rgb24 => {
             let stride = w * 3;
             let mut data = vec![0u8; stride * hh];
             for i in 0..(w * hh) {
@@ -157,9 +183,9 @@ fn samples_to_plane(h: &Header, s: &DecodedSamples) -> Result<(VideoPlane, Pixel
                     data[i * 3 + c] = scale_to_u8(s.samples[i * depth + c], h.maxval);
                 }
             }
-            Ok((VideoPlane { stride, data }, format))
+            Ok((PbmPlane { stride, data }, format))
         }
-        PixelFormat::Rgb48Le => {
+        PbmPixelFormat::Rgb48Le => {
             let stride = w * 6;
             let mut data = vec![0u8; stride * hh];
             for i in 0..(w * hh) {
@@ -169,18 +195,18 @@ fn samples_to_plane(h: &Header, s: &DecodedSamples) -> Result<(VideoPlane, Pixel
                     data[off..off + 2].copy_from_slice(&v.to_le_bytes());
                 }
             }
-            Ok((VideoPlane { stride, data }, format))
+            Ok((PbmPlane { stride, data }, format))
         }
-        PixelFormat::Ya8 => {
+        PbmPixelFormat::Ya8 => {
             let stride = w * 2;
             let mut data = vec![0u8; stride * hh];
             for i in 0..(w * hh) {
                 data[i * 2] = scale_to_u8(s.samples[i * depth], h.maxval);
                 data[i * 2 + 1] = scale_to_u8(s.samples[i * depth + 1], h.maxval);
             }
-            Ok((VideoPlane { stride, data }, format))
+            Ok((PbmPlane { stride, data }, format))
         }
-        PixelFormat::Rgba => {
+        PbmPixelFormat::Rgba => {
             let stride = w * 4;
             let mut data = vec![0u8; stride * hh];
             // Map (depth, tupltype) → RGBA layout.
@@ -190,9 +216,9 @@ fn samples_to_plane(h: &Header, s: &DecodedSamples) -> Result<(VideoPlane, Pixel
                 let src = &s.samples[i * depth..i * depth + depth];
                 fill_rgba_u8(pix, src, h.maxval, layout);
             }
-            Ok((VideoPlane { stride, data }, format))
+            Ok((PbmPlane { stride, data }, format))
         }
-        PixelFormat::Rgba64Le => {
+        PbmPixelFormat::Rgba64Le => {
             let stride = w * 8;
             let mut data = vec![0u8; stride * hh];
             for i in 0..(w * hh) {
@@ -207,11 +233,12 @@ fn samples_to_plane(h: &Header, s: &DecodedSamples) -> Result<(VideoPlane, Pixel
                 data[off + 4..off + 6].copy_from_slice(&b.to_le_bytes());
                 data[off + 6..off + 8].copy_from_slice(&a.to_le_bytes());
             }
-            Ok((VideoPlane { stride, data }, format))
+            Ok((PbmPlane { stride, data }, format))
         }
-        other => Err(Error::unsupported(format!(
-            "Netpbm: pixel format {other:?} not handled in round 1"
-        ))),
+        // `Bgra` is encode-side input only — never picked by the decoder.
+        PbmPixelFormat::Bgra => Err(Error::unsupported(
+            "Netpbm: BGRA decode not produced by any source format".to_string(),
+        )),
     }
 }
 
@@ -278,45 +305,45 @@ fn fill_rgba_u8(dst: &mut [u8], src: &[u16], maxval: u32, layout: RgbaLayout) {
     }
 }
 
-/// Pick the best [`PixelFormat`] for the parsed header. PAM tuple types
+/// Pick the best [`PbmPixelFormat`] for the parsed header. PAM tuple types
 /// drive the choice when present; otherwise we go by `(depth, bits)`.
-fn pick_pixel_format(h: &Header) -> Result<PixelFormat> {
+fn pick_pixel_format(h: &Header) -> Result<PbmPixelFormat> {
     Ok(match h.magic {
-        Magic::P1AsciiBitmap | Magic::P4BinaryBitmap => PixelFormat::MonoBlack,
+        Magic::P1AsciiBitmap | Magic::P4BinaryBitmap => PbmPixelFormat::MonoBlack,
         Magic::P2AsciiGraymap | Magic::P5BinaryGraymap => {
             if h.maxval > 255 {
-                PixelFormat::Gray16Le
+                PbmPixelFormat::Gray16Le
             } else {
-                PixelFormat::Gray8
+                PbmPixelFormat::Gray8
             }
         }
         Magic::P3AsciiPixmap | Magic::P6BinaryPixmap => {
             if h.maxval > 255 {
-                PixelFormat::Rgb48Le
+                PbmPixelFormat::Rgb48Le
             } else {
-                PixelFormat::Rgb24
+                PbmPixelFormat::Rgb24
             }
         }
         Magic::P7Pam => match (h.tupltype, h.depth, h.maxval > 255) {
-            (Some(Tupltype::BlackAndWhite), _, _) => PixelFormat::MonoBlack,
-            (Some(Tupltype::Grayscale), _, false) => PixelFormat::Gray8,
-            (Some(Tupltype::Grayscale), _, true) => PixelFormat::Gray16Le,
-            (Some(Tupltype::Rgb), _, false) => PixelFormat::Rgb24,
-            (Some(Tupltype::Rgb), _, true) => PixelFormat::Rgb48Le,
-            (Some(Tupltype::GrayscaleAlpha), _, false) => PixelFormat::Ya8,
-            (Some(Tupltype::GrayscaleAlpha), _, true) => PixelFormat::Rgba, // no Ya16 in core
-            (Some(Tupltype::BlackAndWhiteAlpha), _, _) => PixelFormat::Rgba,
-            (Some(Tupltype::RgbAlpha), _, false) => PixelFormat::Rgba,
-            (Some(Tupltype::RgbAlpha), _, true) => PixelFormat::Rgba64Le,
+            (Some(Tupltype::BlackAndWhite), _, _) => PbmPixelFormat::MonoBlack,
+            (Some(Tupltype::Grayscale), _, false) => PbmPixelFormat::Gray8,
+            (Some(Tupltype::Grayscale), _, true) => PbmPixelFormat::Gray16Le,
+            (Some(Tupltype::Rgb), _, false) => PbmPixelFormat::Rgb24,
+            (Some(Tupltype::Rgb), _, true) => PbmPixelFormat::Rgb48Le,
+            (Some(Tupltype::GrayscaleAlpha), _, false) => PbmPixelFormat::Ya8,
+            (Some(Tupltype::GrayscaleAlpha), _, true) => PbmPixelFormat::Rgba, // no Ya16 in core
+            (Some(Tupltype::BlackAndWhiteAlpha), _, _) => PbmPixelFormat::Rgba,
+            (Some(Tupltype::RgbAlpha), _, false) => PbmPixelFormat::Rgba,
+            (Some(Tupltype::RgbAlpha), _, true) => PbmPixelFormat::Rgba64Le,
             // Tuple type omitted — fall back on depth.
-            (None, 1, false) => PixelFormat::Gray8,
-            (None, 1, true) => PixelFormat::Gray16Le,
-            (None, 2, false) => PixelFormat::Ya8,
-            (None, 2, true) => PixelFormat::Rgba,
-            (None, 3, false) => PixelFormat::Rgb24,
-            (None, 3, true) => PixelFormat::Rgb48Le,
-            (None, 4, false) => PixelFormat::Rgba,
-            (None, 4, true) => PixelFormat::Rgba64Le,
+            (None, 1, false) => PbmPixelFormat::Gray8,
+            (None, 1, true) => PbmPixelFormat::Gray16Le,
+            (None, 2, false) => PbmPixelFormat::Ya8,
+            (None, 2, true) => PbmPixelFormat::Rgba,
+            (None, 3, false) => PbmPixelFormat::Rgb24,
+            (None, 3, true) => PbmPixelFormat::Rgb48Le,
+            (None, 4, false) => PbmPixelFormat::Rgba,
+            (None, 4, true) => PbmPixelFormat::Rgba64Le,
             (_, d, _) => {
                 return Err(Error::unsupported(format!(
                     "PAM: depth {d} with no recognised TUPLTYPE"
@@ -375,9 +402,9 @@ mod tests {
     #[test]
     fn decode_p3_simple() {
         let buf = b"P3\n2 1\n255\n255 0 0  0 255 0\n";
-        let (frame, fmt) = decode_pbm(buf).unwrap();
-        assert_eq!(fmt, PixelFormat::Rgb24);
-        assert_eq!(frame.planes[0].data, [255, 0, 0, 0, 255, 0]);
+        let (image, fmt) = decode_pbm(buf).unwrap();
+        assert_eq!(fmt, PbmPixelFormat::Rgb24);
+        assert_eq!(image.planes[0].data, [255, 0, 0, 0, 255, 0]);
     }
 
     #[test]
@@ -386,10 +413,10 @@ mod tests {
         let mut buf = Vec::from(&header[..]);
         // R=0xABCD, G=0x1234, B=0x5678 in BE
         buf.extend_from_slice(&[0xAB, 0xCD, 0x12, 0x34, 0x56, 0x78]);
-        let (frame, fmt) = decode_pbm(&buf).unwrap();
-        assert_eq!(fmt, PixelFormat::Rgb48Le);
+        let (image, fmt) = decode_pbm(&buf).unwrap();
+        assert_eq!(fmt, PbmPixelFormat::Rgb48Le);
         // LE in plane: r,g,b each 2 bytes
-        assert_eq!(frame.planes[0].data, [0xCD, 0xAB, 0x34, 0x12, 0x78, 0x56]);
+        assert_eq!(image.planes[0].data, [0xCD, 0xAB, 0x34, 0x12, 0x78, 0x56]);
     }
 
     #[test]
@@ -398,9 +425,9 @@ mod tests {
             b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n".as_slice(),
         );
         buf.extend_from_slice(&[10, 20, 30, 40]);
-        let (frame, fmt) = decode_pbm(&buf).unwrap();
-        assert_eq!(fmt, PixelFormat::Rgba);
-        assert_eq!(frame.planes[0].data, [10, 20, 30, 40]);
+        let (image, fmt) = decode_pbm(&buf).unwrap();
+        assert_eq!(fmt, PbmPixelFormat::Rgba);
+        assert_eq!(image.planes[0].data, [10, 20, 30, 40]);
     }
 
     #[test]
@@ -409,12 +436,12 @@ mod tests {
         let mut buf = Vec::from(b"P4\n11 1\n".as_slice());
         buf.push(0b1010_1100);
         buf.push(0b1110_0000);
-        let (frame, fmt) = decode_pbm(&buf).unwrap();
-        assert_eq!(fmt, PixelFormat::MonoBlack);
+        let (image, fmt) = decode_pbm(&buf).unwrap();
+        assert_eq!(fmt, PbmPixelFormat::MonoBlack);
         // MonoBlack stores the same MSB-first bit layout as PBM, so the
         // plane bytes round-trip the input bytes for the populated bits.
-        assert_eq!(frame.planes[0].stride, 2);
-        assert_eq!(frame.planes[0].data[0], 0b1010_1100);
-        assert_eq!(frame.planes[0].data[1] & 0b1110_0000, 0b1110_0000);
+        assert_eq!(image.planes[0].stride, 2);
+        assert_eq!(image.planes[0].data[0], 0b1010_1100);
+        assert_eq!(image.planes[0].data[1] & 0b1110_0000, 0b1110_0000);
     }
 }

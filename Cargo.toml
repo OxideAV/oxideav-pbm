@@ -13,4 +13,19 @@ keywords = ["multimedia", "image", "netpbm", "codec", "pure-rust"]
 categories = ["multimedia::encoding", "multimedia::images"]
 
 [dependencies]
-oxideav-core = "0.1"
+# `oxideav-core` is gated behind the default-on `registry` feature so
+# image-library consumers can depend on `oxideav-pbm` with
+# `default-features = false` and avoid the framework dependency tree
+# entirely. Without `registry` the crate exposes the standalone
+# `decode_pbm` / `encode_pbm` API plus crate-local `PbmImage` / `PbmError`
+# / `PbmPixelFormat` types and never references `oxideav-core`.
+oxideav-core = { version = "0.1", optional = true }
+
+[features]
+default = ["registry"]
+
+# Wires up the codec / encoder / decoder / container demuxer + muxer
+# trait implementations against `oxideav-core` so the crate can plug
+# into the `oxideav` framework registry. Default-on; turn off for
+# image-library use-cases that just want the standalone `decode_pbm` API.
+registry = ["dep:oxideav-core"]

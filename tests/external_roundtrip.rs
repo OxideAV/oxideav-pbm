@@ -8,8 +8,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use oxideav_core::PixelFormat;
-use oxideav_pbm::{decode_pbm, encode_pbm};
+use oxideav_pbm::{decode_pbm, encode_pbm, PbmImage, PbmPixelFormat, PbmPlane};
 
 fn have(prog: &str) -> bool {
     Command::new(prog)
@@ -51,11 +50,14 @@ fn pnmtoplainpnm_roundtrip_p6() {
             data.push(((x ^ y) * 17) as u8);
         }
     }
-    let src = oxideav_core::VideoFrame {
+    let src = PbmImage {
+        width: 8,
+        height: 6,
+        pixel_format: PbmPixelFormat::Rgb24,
+        planes: vec![PbmPlane { stride: 24, data }],
         pts: None,
-        planes: vec![oxideav_core::VideoPlane { stride: 24, data }],
     };
-    let bin = encode_pbm(&src, PixelFormat::Rgb24, 8, 6).unwrap();
+    let bin = encode_pbm(&src).unwrap();
     let plain = match pipe_through("pnmtoplainpnm", &[], &bin) {
         Some(v) => v,
         None => {
@@ -66,6 +68,6 @@ fn pnmtoplainpnm_roundtrip_p6() {
     // The plain version should be P3 ASCII; decode it through us.
     assert!(plain.starts_with(b"P3\n"));
     let (back, fmt) = decode_pbm(&plain).unwrap();
-    assert_eq!(fmt, PixelFormat::Rgb24);
+    assert_eq!(fmt, PbmPixelFormat::Rgb24);
     assert_eq!(back.planes[0].data, src.planes[0].data);
 }

@@ -20,7 +20,7 @@
 //! between samples). The man pages define no maximum line length; we
 //! simply scan token-by-token until each numeric field is filled.
 
-use oxideav_core::{Error, Result};
+use crate::error::{PbmError as Error, Result};
 
 /// One of the seven Netpbm magic numbers, plus PAM (P7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

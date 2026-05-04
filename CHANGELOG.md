@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Standalone-friendly retrofit (#360): `oxideav-core` is now an
+  optional dep behind a default-on `registry` cargo feature.
+  Image-library consumers can depend on `oxideav-pbm` with
+  `default-features = false` to get a framework-free build that
+  exposes the standalone `decode_pbm` / `encode_pbm` /
+  `encode_pbm_ascii` API plus crate-local `PbmImage` /
+  `PbmPixelFormat` / `PbmError` types. The `Decoder` / `Encoder`
+  trait surface and the container registration stay behind the
+  `registry` feature.
+- `encode_pbm` / `encode_pbm_ascii` signature simplified to take a
+  `&PbmImage` (carrying width, height, pixel format inline). New
+  `encode_pbm_plane` / `encode_pbm_ascii_plane` helpers expose the
+  underlying plane-based API.
+
 ### Added
 
 - Initial release: pure-Rust Netpbm codec + container covering all
