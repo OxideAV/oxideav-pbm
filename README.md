@@ -53,7 +53,6 @@ for size.
 ## Registration
 
 ```rust
-let mut codecs = oxideav_core::CodecRegistry::new();
-let mut containers = oxideav_core::ContainerRegistry::new();
-oxideav_pbm::register(&mut codecs, &mut containers);
+let mut ctx = oxideav_core::RuntimeContext::new();
+oxideav_pbm::register(&mut ctx);
 ```

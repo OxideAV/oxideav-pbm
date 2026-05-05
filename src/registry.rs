@@ -17,6 +17,7 @@
 //!   and the crate-local [`PbmPixelFormat`].
 
 use oxideav_core::ContainerRegistry;
+use oxideav_core::RuntimeContext;
 use oxideav_core::{CodecCapabilities, CodecId, PixelFormat};
 use oxideav_core::{CodecInfo, CodecRegistry};
 
@@ -100,9 +101,35 @@ pub fn register_containers(reg: &mut ContainerRegistry) {
     container::register(reg);
 }
 
-/// Combined registration for callers that just want everything wired up
-/// in one call.
-pub fn register(codecs: &mut CodecRegistry, containers: &mut ContainerRegistry) {
-    register_codecs(codecs);
-    register_containers(containers);
+/// Unified registration entry point — installs the Netpbm codec into
+/// the codec sub-registry and the Netpbm container into the container
+/// sub-registry of the supplied [`RuntimeContext`].
+pub fn register(ctx: &mut RuntimeContext) {
+    register_codecs(&mut ctx.codecs);
+    register_containers(&mut ctx.containers);
+}
+
+#[cfg(test)]
+mod register_tests {
+    use super::*;
+
+    #[test]
+    fn register_via_runtime_context_installs_both_sides() {
+        let mut ctx = RuntimeContext::new();
+        register(&mut ctx);
+        let id = CodecId::new(crate::CODEC_ID_STR);
+        assert!(
+            ctx.codecs.has_decoder(&id),
+            "PBM decoder factory not installed via RuntimeContext"
+        );
+        assert!(
+            ctx.codecs.has_encoder(&id),
+            "PBM encoder factory not installed via RuntimeContext"
+        );
+        assert_eq!(
+            ctx.containers.container_for_extension("pbm"),
+            Some("pbm"),
+            "PBM container extension not installed via RuntimeContext"
+        );
+    }
 }
