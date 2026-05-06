@@ -57,7 +57,8 @@ pub use image::{PbmImage, PbmPixelFormat, PbmPlane};
 
 #[cfg(feature = "registry")]
 pub use registry::{
-    pbm_to_pixel_format, pixel_format_to_pbm, register, register_codecs, register_containers,
+    __oxideav_entry, pbm_to_pixel_format, pixel_format_to_pbm, register, register_codecs,
+    register_containers,
 };
 
 #[cfg(test)]
