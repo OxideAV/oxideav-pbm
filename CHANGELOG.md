@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `encode_pbm_with_format(&PbmImage, PbmEncodeFormat) -> Result<Vec<u8>>`
+  public API: callers can now pin the on-disk magic explicitly instead
+  of relying on the auto-selected closest-match. The `PbmEncodeFormat`
+  enum has one variant per Netpbm magic (`Pnm1` / `Pnm2` / `Pnm3` /
+  `Pnm4` / `Pnm5` / `Pnm6` / `Pam7`) plus `AutoBinary` / `AutoAscii`
+  convenience modes that match the existing `encode_pbm` /
+  `encode_pbm_ascii` behaviour.
+- P7 PAM encoder now handles `GRAYSCALE` and `RGB` tuple types (depths
+  1 / 3) — previously the P7 encoder only emitted the alpha-bearing
+  tuple types (`GRAYSCALE_ALPHA`, `RGB_ALPHA`) because the auto-format
+  selector always preferred P5 / P6 for non-alpha pixel formats. The
+  new `PbmEncodeFormat::Pam7` selector exercises the new path.
+
+### Fixed
+
+- Lenient parser hardening: added regression tests for MAXVAL=1 on
+  ASCII PGM (`P2`) and binary PGM (`P5`) — the spec permits a
+  degenerate "PBM-as-PGM" form, which the existing decode path scales
+  correctly to `Gray8` (0 / 0xFF) but had no test coverage.
+- Regression tests for header tolerances: every ASCII whitespace
+  category (space / tab / CR / LF / VT / FF) accepted between samples,
+  comments interleaved at every legal position in ASCII P2 bodies,
+  blank + comment lines anywhere in the PAM header, CRLF line endings
+  in PAM, and unknown PAM header keys silently ignored per the
+  "implementations should ignore unknown keys" man-page guidance.
+- `Tupltype::channels()` simplified: the awkward nested `match` arm
+  that grouped `Rgb` with the 2-channel alpha types and then
+  disambiguated inside has been flattened. No behaviour change.
+
 ## [0.0.3](https://github.com/OxideAV/oxideav-pbm/compare/v0.0.2...v0.0.3) - 2026-05-06
 
 ### Other

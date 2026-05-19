@@ -17,6 +17,12 @@
 //! instead of a silent conversion. ASCII output (P1/P2/P3) can be
 //! requested via [`encode_pbm_ascii`] — the binary path is always
 //! preferred for size.
+//!
+//! Callers that need to pin the on-disk magic explicitly (regardless of
+//! the input [`PbmPixelFormat`]) use [`encode_pbm_with_format`] +
+//! [`PbmEncodeFormat`] — useful when the consumer cares whether they
+//! get the plain ASCII form (`P1`/`P2`/`P3`) or the binary form
+//! (`P4`/`P5`/`P6`/`P7`).
 
 use crate::error::{PbmError as Error, Result};
 
@@ -127,6 +133,124 @@ pub fn encode_pbm(image: &PbmImage) -> Result<Vec<u8>> {
         image.width,
         image.height,
     )
+}
+
+/// Output-format selector for [`encode_pbm_with_format`].
+///
+/// Encoders sometimes need to pin the on-disk magic — for instance, a
+/// downstream tool that only reads `pamfile`-style PAM, or a debugging
+/// dump that wants the plain-ASCII PNM form.
+///
+/// `Auto*` modes ask the encoder to pick the closest matching magic
+/// from the [`PbmPixelFormat`] (same behaviour as [`encode_pbm`] /
+/// [`encode_pbm_ascii`]). Explicit modes (`Pnm1` … `Pam7`) force a
+/// specific magic; the encoder still returns `Unsupported` if the
+/// input pixel format cannot be represented in that magic (e.g. P1
+/// only accepts `MonoBlack`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PbmEncodeFormat {
+    /// Pick the closest binary magic (P4/P5/P6/P7) — same as
+    /// [`encode_pbm`].
+    AutoBinary,
+    /// Pick the closest plain-ASCII magic (P1/P2/P3) — same as
+    /// [`encode_pbm_ascii`]. Errors on alpha pixel formats since
+    /// P1/P2/P3 cannot represent them.
+    AutoAscii,
+    /// Force `P1` plain-ASCII bitmap. Only valid for `MonoBlack`.
+    Pnm1,
+    /// Force `P2` plain-ASCII graymap. Valid for `Gray8` (always emits
+    /// MAXVAL 255 — 16-bit grayscale is rejected since ASCII PGM has
+    /// no defined upper-bound representation in our `u16` body
+    /// encoder).
+    Pnm2,
+    /// Force `P3` plain-ASCII pixmap. Valid for `Rgb24` (MAXVAL 255).
+    Pnm3,
+    /// Force `P4` binary bitmap. Only valid for `MonoBlack`.
+    Pnm4,
+    /// Force `P5` binary graymap. Valid for `Gray8` (MAXVAL 255) and
+    /// `Gray16Le` (MAXVAL 65535, big-endian samples on disk).
+    Pnm5,
+    /// Force `P6` binary pixmap. Valid for `Rgb24` (MAXVAL 255) and
+    /// `Rgb48Le` (MAXVAL 65535).
+    Pnm6,
+    /// Force `P7` PAM. Valid for every supported [`PbmPixelFormat`]
+    /// except `MonoBlack` (where P4 is the natural form — PAM
+    /// `BLACKANDWHITE` is supported via the auto path on decode but
+    /// the encoder always emits P4 for `MonoBlack` since P7
+    /// `BLACKANDWHITE` would be a bigger header for the same payload).
+    Pam7,
+}
+
+/// Encode a [`PbmImage`] with an explicit choice of output magic.
+///
+/// `Auto*` variants delegate to [`encode_pbm`] / [`encode_pbm_ascii`].
+/// Explicit `Pnm*` / `Pam7` variants force the specified magic and
+/// reject pixel formats that can't be represented in it.
+pub fn encode_pbm_with_format(image: &PbmImage, format: PbmEncodeFormat) -> Result<Vec<u8>> {
+    if image.planes.is_empty() {
+        return Err(Error::invalid("PBM encoder: empty plane"));
+    }
+    let plane = &image.planes[0];
+    let w = image.width as usize;
+    let h = image.height as usize;
+    if plane.data.len() < plane.stride * h {
+        return Err(Error::invalid("PBM encoder: plane truncated"));
+    }
+    match format {
+        PbmEncodeFormat::AutoBinary => encode_pbm(image),
+        PbmEncodeFormat::AutoAscii => encode_pbm_ascii(image),
+        PbmEncodeFormat::Pnm1 => match image.pixel_format {
+            PbmPixelFormat::MonoBlack => Ok(emit_ascii_pbm_header_and_body(plane, w, h)),
+            other => Err(Error::unsupported(format!(
+                "PBM encoder: pixel format {other:?} cannot be emitted as P1"
+            ))),
+        },
+        PbmEncodeFormat::Pnm2 => match image.pixel_format {
+            PbmPixelFormat::Gray8 => Ok(emit_ascii_pgm_8(plane, w, h)),
+            other => Err(Error::unsupported(format!(
+                "PBM encoder: pixel format {other:?} cannot be emitted as P2"
+            ))),
+        },
+        PbmEncodeFormat::Pnm3 => match image.pixel_format {
+            PbmPixelFormat::Rgb24 => Ok(emit_ascii_ppm_8(plane, w, h)),
+            other => Err(Error::unsupported(format!(
+                "PBM encoder: pixel format {other:?} cannot be emitted as P3"
+            ))),
+        },
+        PbmEncodeFormat::Pnm4 => match image.pixel_format {
+            PbmPixelFormat::MonoBlack => encode_p4(plane, w, h),
+            other => Err(Error::unsupported(format!(
+                "PBM encoder: pixel format {other:?} cannot be emitted as P4"
+            ))),
+        },
+        PbmEncodeFormat::Pnm5 => match image.pixel_format {
+            PbmPixelFormat::Gray8 => encode_p5_gray8(plane, w, h),
+            PbmPixelFormat::Gray16Le => encode_p5_gray16(plane, w, h),
+            other => Err(Error::unsupported(format!(
+                "PBM encoder: pixel format {other:?} cannot be emitted as P5"
+            ))),
+        },
+        PbmEncodeFormat::Pnm6 => match image.pixel_format {
+            PbmPixelFormat::Rgb24 => encode_p6_rgb8(plane, w, h),
+            PbmPixelFormat::Rgb48Le => encode_p6_rgb16(plane, w, h),
+            other => Err(Error::unsupported(format!(
+                "PBM encoder: pixel format {other:?} cannot be emitted as P6"
+            ))),
+        },
+        PbmEncodeFormat::Pam7 => match image.pixel_format {
+            PbmPixelFormat::Gray8 => encode_p7_gray8(plane, w, h),
+            PbmPixelFormat::Gray16Le => encode_p7_gray16(plane, w, h),
+            PbmPixelFormat::Rgb24 => encode_p7_rgb8(plane, w, h),
+            PbmPixelFormat::Rgb48Le => encode_p7_rgb16(plane, w, h),
+            PbmPixelFormat::Rgba => encode_p7_rgba8(plane, w, h),
+            PbmPixelFormat::Bgra => encode_p7_bgra8(plane, w, h),
+            PbmPixelFormat::Rgba64Le => encode_p7_rgba16(plane, w, h),
+            PbmPixelFormat::Ya8 => encode_p7_ya8(plane, w, h),
+            other => Err(Error::unsupported(format!(
+                "PBM encoder: pixel format {other:?} cannot be emitted as P7"
+            ))),
+        },
+    }
 }
 
 /// Encode a single [`PbmPlane`] (width × height pixels in `format`)
@@ -280,6 +404,47 @@ fn header_pam(w: usize, h: usize, depth: u32, maxval: u32, tupltype: &str) -> Ve
     out
 }
 
+fn encode_p7_gray8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
+    let mut out = header_pam(w, h, 1, 255, "GRAYSCALE");
+    for y in 0..h {
+        out.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w]);
+    }
+    Ok(out)
+}
+
+fn encode_p7_gray16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
+    let mut out = header_pam(w, h, 1, 65535, "GRAYSCALE");
+    for y in 0..h {
+        let row = &plane.data[y * plane.stride..y * plane.stride + w * 2];
+        // `Gray16Le` is LE in memory; on-disk PAM wants big-endian.
+        for chunk in row.chunks_exact(2) {
+            out.push(chunk[1]);
+            out.push(chunk[0]);
+        }
+    }
+    Ok(out)
+}
+
+fn encode_p7_rgb8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
+    let mut out = header_pam(w, h, 3, 255, "RGB");
+    for y in 0..h {
+        out.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w * 3]);
+    }
+    Ok(out)
+}
+
+fn encode_p7_rgb16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
+    let mut out = header_pam(w, h, 3, 65535, "RGB");
+    for y in 0..h {
+        let row = &plane.data[y * plane.stride..y * plane.stride + w * 6];
+        for chunk in row.chunks_exact(2) {
+            out.push(chunk[1]);
+            out.push(chunk[0]);
+        }
+    }
+    Ok(out)
+}
+
 fn encode_p7_rgba8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     let mut out = header_pam(w, h, 4, 255, "RGB_ALPHA");
     for y in 0..h {
@@ -430,5 +595,67 @@ mod tests {
         let s = std::str::from_utf8(&bytes[..bytes.len() - 4]).unwrap();
         assert!(s.contains("TUPLTYPE RGB_ALPHA"));
         assert_eq!(&bytes[bytes.len() - 4..], &[10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn explicit_format_p1_rejects_non_mono() {
+        let img = make_image(PbmPixelFormat::Gray8, 1, 1, 1, vec![128]);
+        let err = encode_pbm_with_format(&img, PbmEncodeFormat::Pnm1).unwrap_err();
+        match err {
+            Error::Unsupported(_) => {}
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_format_pam7_for_gray8_emits_p7_grayscale() {
+        let img = make_image(PbmPixelFormat::Gray8, 2, 1, 2, vec![10, 20]);
+        let bytes = encode_pbm_with_format(&img, PbmEncodeFormat::Pam7).unwrap();
+        assert!(bytes.starts_with(b"P7\n"));
+        let s = std::str::from_utf8(&bytes[..bytes.len() - 2]).unwrap();
+        assert!(s.contains("TUPLTYPE GRAYSCALE"));
+        assert!(s.contains("DEPTH 1"));
+        assert!(s.contains("MAXVAL 255"));
+        assert_eq!(&bytes[bytes.len() - 2..], &[10, 20]);
+    }
+
+    #[test]
+    fn explicit_format_pam7_rgb16_be_swap() {
+        // Verify P7 RGB 16-bit BE swap is the same as P6 16-bit's.
+        let img = make_image(
+            PbmPixelFormat::Rgb48Le,
+            1,
+            1,
+            6,
+            // R=0x0102, G=0x0304, B=0x0506 in LE
+            vec![0x02, 0x01, 0x04, 0x03, 0x06, 0x05],
+        );
+        let bytes = encode_pbm_with_format(&img, PbmEncodeFormat::Pam7).unwrap();
+        let body = &bytes[bytes.len() - 6..];
+        assert_eq!(body, &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
+    }
+
+    #[test]
+    fn explicit_format_p5_for_gray16_is_canonical() {
+        // P5 with 16-bit gray should be the same as the auto-binary path
+        // for `Gray16Le`.
+        let img = make_image(
+            PbmPixelFormat::Gray16Le,
+            2,
+            1,
+            4,
+            vec![0x34, 0x12, 0x78, 0x56],
+        );
+        let auto = encode_pbm(&img).unwrap();
+        let explicit = encode_pbm_with_format(&img, PbmEncodeFormat::Pnm5).unwrap();
+        assert_eq!(auto, explicit);
+    }
+
+    #[test]
+    fn auto_ascii_routes_to_encode_pbm_ascii() {
+        let img = make_image(PbmPixelFormat::Rgb24, 2, 1, 6, vec![1, 2, 3, 4, 5, 6]);
+        let auto = encode_pbm_ascii(&img).unwrap();
+        let explicit = encode_pbm_with_format(&img, PbmEncodeFormat::AutoAscii).unwrap();
+        assert_eq!(auto, explicit);
     }
 }

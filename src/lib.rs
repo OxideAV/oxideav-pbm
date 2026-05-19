@@ -50,7 +50,10 @@ pub mod registry;
 pub const CODEC_ID_STR: &str = "pbm";
 
 pub use decoder::decode_pbm;
-pub use encoder::{encode_pbm, encode_pbm_ascii, encode_pbm_ascii_plane, encode_pbm_plane};
+pub use encoder::{
+    encode_pbm, encode_pbm_ascii, encode_pbm_ascii_plane, encode_pbm_plane, encode_pbm_with_format,
+    PbmEncodeFormat,
+};
 pub use error::{PbmError, Result};
 pub use header::{parse_header, Header, Magic, Tupltype};
 pub use image::{PbmImage, PbmPixelFormat, PbmPlane};

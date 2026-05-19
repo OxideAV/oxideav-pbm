@@ -42,6 +42,14 @@ Plain ASCII output (P1/P2/P3) is available via
 [`encoder::encode_pbm_ascii`] — the binary path is always preferred
 for size.
 
+For callers that need to pin the on-disk magic explicitly,
+[`encoder::encode_pbm_with_format`] takes a [`encoder::PbmEncodeFormat`]
+selector covering every magic individually (`Pnm1` / `Pnm2` / `Pnm3` /
+`Pnm4` / `Pnm5` / `Pnm6` / `Pam7`) plus the convenience `AutoBinary` /
+`AutoAscii` variants. P7 PAM accepts every supported `PbmPixelFormat`
+(including the GRAYSCALE-as-PAM case that `encode_pbm` would otherwise
+route to P5).
+
 ## Round 1 deferrals
 
 * User-defined `TUPLTYPE` strings (round 1 supports the six standard

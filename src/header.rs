@@ -122,10 +122,8 @@ impl Tupltype {
     pub fn channels(self) -> usize {
         match self {
             Self::BlackAndWhite | Self::Grayscale => 1,
-            Self::BlackAndWhiteAlpha | Self::GrayscaleAlpha | Self::Rgb => match self {
-                Self::Rgb => 3,
-                _ => 2,
-            },
+            Self::BlackAndWhiteAlpha | Self::GrayscaleAlpha => 2,
+            Self::Rgb => 3,
             Self::RgbAlpha => 4,
         }
     }
