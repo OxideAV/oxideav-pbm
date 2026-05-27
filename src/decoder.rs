@@ -132,6 +132,32 @@ fn samples_to_plane(h: &Header, s: &DecodedSamples) -> Result<(PbmPlane, PbmPixe
     let format = pick_pixel_format(h)?;
     let _ = bps; // bits-per-sample is implicit in the chosen format
 
+    // Defence-in-depth: validate that the (stride, height) the chosen
+    // pixel format implies cannot overflow `usize`. `decode_binary` /
+    // `decode_ascii` already validate the sample-buffer size against
+    // the body length; this check guards `vec![0u8; stride * hh]`
+    // against a downstream multiplication overflow if either layer
+    // returned a `DecodedSamples` larger than `usize::MAX / 8`.
+    let bytes_per_pixel: usize = match format {
+        PbmPixelFormat::MonoBlack => 1, // computed as div_ceil below
+        PbmPixelFormat::Gray8 => 1,
+        PbmPixelFormat::Ya8 => 2,
+        PbmPixelFormat::Gray16Le => 2,
+        PbmPixelFormat::Rgb24 => 3,
+        PbmPixelFormat::Rgba | PbmPixelFormat::Bgra => 4,
+        PbmPixelFormat::Rgb48Le => 6,
+        PbmPixelFormat::Rgba64Le => 8,
+    };
+    let stride_check = if matches!(format, PbmPixelFormat::MonoBlack) {
+        w.div_ceil(8)
+    } else {
+        w.checked_mul(bytes_per_pixel)
+            .ok_or_else(|| Error::invalid("Netpbm: stride overflow"))?
+    };
+    stride_check
+        .checked_mul(hh)
+        .ok_or_else(|| Error::invalid("Netpbm: plane-size overflow"))?;
+
     match format {
         PbmPixelFormat::MonoBlack => {
             // 1 bit per pixel, MSB-first packed, rows padded to byte

@@ -16,6 +16,7 @@ use crate::header::{Header, Magic};
 /// `bits_per_sample == 1` and 8 there's one entry per sample fitting in
 /// the byte (we widen to u16 anyway so callers can treat the buffer
 /// uniformly).
+#[derive(Debug)]
 pub struct DecodedSamples {
     pub width: u32,
     pub height: u32,
@@ -39,6 +40,27 @@ pub fn decode_binary(h: &Header, data: &[u8]) -> Result<DecodedSamples> {
         .checked_mul(hh)
         .and_then(|v| v.checked_mul(samples_per_pixel))
         .ok_or_else(|| Error::invalid("Netpbm: dimension overflow"))?;
+
+    // Verify the body actually contains enough bytes for the claimed
+    // dimensions BEFORE allocating the sample buffer — otherwise a
+    // malformed header with `width * height` in the billions would
+    // OOM the process. The exact `need` is per-magic; compute it
+    // here so the allocation below is bounded by trustworthy input
+    // length.
+    let need = match h.magic {
+        Magic::P4BinaryBitmap => w.div_ceil(8).checked_mul(hh),
+        Magic::P5BinaryGraymap | Magic::P6BinaryPixmap | Magic::P7Pam => {
+            let bps = h.bits_per_sample();
+            let bytes_per_sample = if bps == 16 { 2 } else { 1 };
+            total_samples.checked_mul(bytes_per_sample)
+        }
+        _ => return Err(Error::invalid("decode_binary called with non-binary magic")),
+    }
+    .ok_or_else(|| Error::invalid("Netpbm: dimension overflow"))?;
+    if data.len() < need {
+        return Err(Error::invalid("Netpbm: pixel data truncated"));
+    }
+
     let mut out = vec![0u16; total_samples];
 
     match h.magic {
@@ -46,10 +68,6 @@ pub fn decode_binary(h: &Header, data: &[u8]) -> Result<DecodedSamples> {
             // 1 bit per pixel, packed MSB-first, rows padded to a byte
             // boundary. Per the spec a 1-bit means BLACK.
             let row_bytes = w.div_ceil(8);
-            let need = row_bytes * hh;
-            if data.len() < need {
-                return Err(Error::invalid("PBM: pixel data truncated"));
-            }
             for y in 0..hh {
                 let row = &data[y * row_bytes..y * row_bytes + row_bytes];
                 for x in 0..w {
@@ -62,12 +80,6 @@ pub fn decode_binary(h: &Header, data: &[u8]) -> Result<DecodedSamples> {
         Magic::P5BinaryGraymap | Magic::P6BinaryPixmap | Magic::P7Pam => {
             let bps = h.bits_per_sample();
             let bytes_per_sample = if bps == 16 { 2 } else { 1 };
-            let need = total_samples
-                .checked_mul(bytes_per_sample)
-                .ok_or_else(|| Error::invalid("Netpbm: dimension overflow"))?;
-            if data.len() < need {
-                return Err(Error::invalid("Netpbm: pixel data truncated"));
-            }
             if bytes_per_sample == 1 {
                 for (i, b) in data[..need].iter().enumerate() {
                     out[i] = *b as u16;
@@ -153,6 +165,25 @@ mod tests {
         assert_eq!(packed.len(), 2);
         assert_eq!(packed[0], 0b1010_1100);
         assert_eq!(packed[1] & 0b1110_0000, 0b1110_0000);
+    }
+
+    #[test]
+    fn binary_huge_dimension_does_not_oom() {
+        // Regression: a P5 header that claims width * height >
+        // body.len() must reject before allocating the sample buffer.
+        // Pre-fix the `vec![0u16; total_samples]` allocation ran
+        // ahead of the body-length check and OOMed on huge headers.
+        use crate::header::{parse_header, Magic};
+        let buf = b"P5\n2 200888808\n255\n\x00\x01\x02\x03";
+        let h = parse_header(buf).unwrap();
+        assert_eq!(h.magic, Magic::P5BinaryGraymap);
+        let err = decode_binary(&h, &buf[h.data_offset..]).unwrap_err();
+        match err {
+            crate::error::PbmError::InvalidData(s) => {
+                assert!(s.contains("truncated"), "unexpected message: {s}");
+            }
+            other => panic!("expected InvalidData, got {other:?}"),
+        }
     }
 
     #[test]

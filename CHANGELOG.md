@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `fuzz/` cargo-fuzz harness with three libfuzzer targets covering the
+  parser surface end-to-end (`decode`), the header-only state machine
+  (`header`), and the encoder × every `PbmEncodeFormat` pair
+  (`encode_roundtrip`). Seed corpus committed: 15 hand-curated
+  `decode/`, 13 `header/`, and 6 `encode_roundtrip/` seeds covering
+  every magic, both 8-bit and 16-bit depths, comment placement, CRLF
+  line endings, PAM BLACKANDWHITE inversion, and PAM unknown-key
+  tolerance. Local panic-freedom verified across 9.3M decode + 6.8M
+  header + 0.4M encoder runs (>=30 s each) with no crashes after the
+  OOM fix below. Daily CI workflow at `.github/workflows/fuzz.yml`
+  (06:47 UTC, 30 min total budget split across the three targets) via
+  the shared `OxideAV/.github` reusable `crate-fuzz.yml` workflow.
+
+### Fixed
+
+- Pre-allocation OOM in `decode_ascii` / `decode_binary`: a header
+  claiming a multi-billion `width * height` (e.g.
+  `P2\n2 200888808\n50\n…`) triggered an unchecked `Vec::with_capacity`
+  / `vec![0u16; …]` and OOMed the process. Both decoders now compute
+  the required body length first and reject the input upfront with
+  `InvalidData` when the claimed dimensions exceed what the body could
+  possibly contain. `samples_to_plane` adds a matching defence-in-depth
+  `stride * height` overflow check before allocating the output plane.
+  Regression tests committed in `src/ascii.rs` /
+  `src/binary.rs` (`ascii_huge_dimension_does_not_oom`,
+  `binary_huge_dimension_does_not_oom`); the original libFuzzer artifact
+  is preserved as `fuzz/corpus/decode/regression_oom_huge_height.bin`.
+
+### Added
+
 - `encode_pbm_with_format(&PbmImage, PbmEncodeFormat) -> Result<Vec<u8>>`
   public API: callers can now pin the on-disk magic explicitly instead
   of relying on the auto-selected closest-match. The `PbmEncodeFormat`

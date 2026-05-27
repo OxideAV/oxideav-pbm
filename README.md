@@ -58,6 +58,26 @@ route to P5).
 * 16-bit `GRAYSCALE_ALPHA` is widened to `Rgba` on decode (no `Ya16`
   variant in `oxideav-core` yet).
 
+## Fuzzing
+
+A `fuzz/` cargo-fuzz workspace exercises three independent entry
+points:
+
+* `decode` — full pipeline (`parse_header` → ASCII/binary body decoder
+  → `samples_to_plane`).
+* `header` — header parser in isolation (PNM tokenizer + PAM
+  key/value block).
+* `encode_roundtrip` — synthetic `PbmImage` → every `PbmEncodeFormat`
+  × `PbmPixelFormat` pair, including the `Unsupported` rejection paths.
+
+The harness uncovered one pre-allocation OOM during round 171 (a
+header claiming `width * height` in the billions triggered an
+unchecked `vec![0u16; total_samples]` before the body-length check) —
+both ASCII and binary decoders now validate dimensions against the
+available body length before allocating. A daily CI run
+(`.github/workflows/fuzz.yml`, 30 min budget split across the three
+targets) keeps the contract enforced.
+
 ## Registration
 
 ```rust

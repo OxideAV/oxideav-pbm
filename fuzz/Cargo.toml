@@ -1,0 +1,85 @@
+[package]
+name = "oxideav-pbm-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Netpbm has a small but adversarial parser surface: an attacker-supplied
+# 2-byte magic, an ASCII header with comments + decimal width/height/
+# maxval/depth tokens (and a multi-line PAM key/value block for P7), then
+# either a bit-packed body (P4), an 8/16-bit big-endian sample stream
+# (P5/P6/P7), or whitespace-separated ASCII digit tokens (P1/P2/P3) —
+# all of whose lengths are derived from the header fields.
+#
+# The fuzz contract is purely panic-freedom: every public decode entry
+# point must return a `Result` for malformed input — never panic, never
+# abort, never over-allocate based on attacker-claimed dimensions.
+#
+# Three independent decode entry points are fuzzed because they map to
+# distinct parser state machines:
+#
+#   * `decode_pbm`       — full pipeline: `parse_header` → ASCII/binary
+#                          body decoder → `samples_to_plane`. Drives
+#                          every code path the public API exposes,
+#                          including the `samples_to_plane` per-
+#                          pixel-format buffer allocator.
+#   * `parse_header`     — header-only: rejects bad magic, validates
+#                          maxval / depth ranges, validates PAM
+#                          TUPLTYPE-vs-depth consistency. Driven
+#                          directly so a single-byte header mutation
+#                          that wouldn't survive end-to-end decode
+#                          still gets exercised at the parser.
+#   * `encode_roundtrip` — feeds arbitrary bytes through the encoder by
+#                          building a synthetic `PbmImage` whose plane
+#                          data is the fuzz input and whose
+#                          width/height/format are taken from the first
+#                          few bytes. Catches encoder panics on
+#                          mismatched stride / plane-data sizes for
+#                          every `PbmPixelFormat` × `PbmEncodeFormat`
+#                          combination.
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oxideav-pbm]
+path = ".."
+default-features = false  # standalone decode/encode path, no registry
+
+# Prevent this fuzz package from being pulled into the umbrella workspace.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+# End-to-end decode — drives `decode_pbm` on arbitrary bytes. The full
+# parser pipeline (`parse_header` → ASCII/binary body decoder →
+# `samples_to_plane` buffer allocator) is exercised.
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+
+# Header-only — drives `parse_header` on arbitrary bytes. Exercises the
+# P1/P2/P3/P4/P5/P6 PNM tokenizer + the P7 PAM line-based key/value
+# block in isolation from body decoding.
+[[bin]]
+name = "header"
+path = "fuzz_targets/header.rs"
+test = false
+doc = false
+
+# Encoder — builds a synthetic `PbmImage` from arbitrary bytes (first
+# byte picks `PbmPixelFormat`, next two are width LE, next two are
+# height LE, remainder is plane data) and runs it through every
+# `PbmEncodeFormat` variant. Catches encoder panics on mismatched
+# stride / plane-size combinations and exercises the `Unsupported`
+# rejection paths for every format × pixel-format pair.
+[[bin]]
+name = "encode_roundtrip"
+path = "fuzz_targets/encode_roundtrip.rs"
+test = false
+doc = false

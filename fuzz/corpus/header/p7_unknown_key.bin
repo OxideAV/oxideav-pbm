@@ -1,0 +1,11 @@
+P7
+# leading comment
+WIDTH 8
+
+HEIGHT 8
+# blank-line tolerance
+DEPTH 3
+MAXVAL 255
+TUPLTYPE RGB
+UNKNOWN_KEY ignored
+ENDHDR

@@ -21,7 +21,21 @@ pub fn decode_ascii(h: &Header, body: &[u8]) -> Result<DecodedSamples> {
     let w = h.width as usize;
     let hh = h.height as usize;
     let depth = h.depth as usize;
-    let total_samples = w * hh * depth;
+    let total_samples = w
+        .checked_mul(hh)
+        .and_then(|v| v.checked_mul(depth))
+        .ok_or_else(|| Error::invalid("Netpbm: dimension overflow"))?;
+    // Each ASCII sample is at minimum one byte on disk (a single digit,
+    // optionally followed by whitespace). A header that claims more
+    // samples than the body could possibly contain is malformed — fail
+    // before allocating the output buffer, otherwise a multi-billion
+    // dimension claim OOMs the process. The `+ 1` accounts for the
+    // last-sample-needs-no-trailing-separator case.
+    if total_samples > body.len().saturating_add(1) {
+        return Err(Error::invalid(
+            "Netpbm ASCII: declared dimensions exceed body length",
+        ));
+    }
     let mut out: Vec<u16> = Vec::with_capacity(total_samples);
 
     let mut cursor = 0usize;
@@ -157,6 +171,27 @@ mod tests {
         let h = parse_header(buf).unwrap();
         let d = decode_ascii(&h, &buf[h.data_offset..]).unwrap();
         assert_eq!(d.samples, vec![0, 128, 200, 50]);
+    }
+
+    #[test]
+    fn ascii_huge_dimension_does_not_oom() {
+        // Regression: r171 fuzz target found a P2 input that claimed
+        // width=2, height=200_000_000 with maxval=50 and only a few
+        // bytes of body. The pre-fix decoder allocated
+        // `Vec<u16>::with_capacity(400_000_000)` and the process
+        // OOMed. The fix rejects the input upfront with InvalidData.
+        let buf = b"P2\n2 200888808\n50\n0 0 0 0";
+        let h = parse_header(buf).unwrap();
+        let err = decode_ascii(&h, &buf[h.data_offset..]).unwrap_err();
+        match err {
+            crate::error::PbmError::InvalidData(s) => {
+                assert!(
+                    s.contains("declared dimensions exceed body length"),
+                    "unexpected message: {s}"
+                );
+            }
+            other => panic!("expected InvalidData, got {other:?}"),
+        }
     }
 
     #[test]
