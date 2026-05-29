@@ -94,21 +94,123 @@ pub fn decode_ascii(h: &Header, body: &[u8]) -> Result<DecodedSamples> {
 /// Encode a P1/P2/P3 ASCII body. Always emits one sample per line for
 /// determinism (matches the canonical "plain" Netpbm output).
 pub fn encode_ascii_body(samples: &[u16], width: u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(samples.len() * 4);
+    // Reserve enough headroom for the worst case (5 digits + separator
+    // per u16 sample) so the writer never has to grow mid-loop.
+    let mut out = Vec::with_capacity(samples.len() * 6 + 1);
     let w = width as usize;
-    for (i, &s) in samples.iter().enumerate() {
-        // Group line breaks per pixel-column for readability — keeps
-        // long lines from blowing past the 70-byte recommendation in
-        // the man page (which itself only suggests, doesn't require).
-        if i > 0 && i % w == 0 {
-            out.push(b'\n');
-        } else if i > 0 {
-            out.push(b' ');
+    let mut col = 0usize;
+    for &s in samples.iter() {
+        if col != 0 {
+            // Group line breaks per pixel-column for readability — keeps
+            // long lines from blowing past the 70-byte recommendation in
+            // the man page (which itself only suggests, doesn't require).
+            if col == w {
+                out.push(b'\n');
+                col = 0;
+            } else {
+                out.push(b' ');
+            }
         }
-        out.extend_from_slice(s.to_string().as_bytes());
+        write_u16_dec(&mut out, s);
+        col += 1;
     }
     out.push(b'\n');
     out
+}
+
+/// Encode an 8-bit-per-sample ASCII body. Specialised entry point for
+/// the P2 / P3 paths whose `PbmPixelFormat` is `Gray8` / `Rgb24` — the
+/// samples are already a `&[u8]` plane slice, so widening through a
+/// `Vec<u16>` and re-narrowing to ASCII (the path the generic
+/// [`encode_ascii_body`] takes) is pure overhead. Writes digits straight
+/// from the source bytes via a 256-entry lookup table.
+pub(crate) fn encode_ascii_body_u8(samples: &[u8], stride_samples: usize) -> Vec<u8> {
+    // Max ASCII width per sample is 3 digits + 1 separator. Add 1 for
+    // the trailing LF.
+    let mut out = Vec::with_capacity(samples.len() * 4 + 1);
+    let mut col = 0usize;
+    for &s in samples.iter() {
+        if col != 0 {
+            if col == stride_samples {
+                out.push(b'\n');
+                col = 0;
+            } else {
+                out.push(b' ');
+            }
+        }
+        write_u8_dec(&mut out, s);
+        col += 1;
+    }
+    out.push(b'\n');
+    out
+}
+
+/// Encode a P1 ASCII bit body straight from `MonoBlack` row bytes.
+/// Each output byte is `b'0'` or `b'1'` separated by a space (line
+/// break at the row boundary). Skips the `Vec<u16>` widen step the
+/// generic [`encode_ascii_body`] takes.
+pub(crate) fn encode_ascii_body_bits(
+    rows: &[u8],
+    row_stride: usize,
+    width: usize,
+    height: usize,
+) -> Vec<u8> {
+    // Two ASCII bytes per pixel (digit + separator) plus a trailing LF.
+    let mut out = Vec::with_capacity(width * height * 2 + 1);
+    for y in 0..height {
+        let row = &rows[y * row_stride..y * row_stride + row_stride];
+        for x in 0..width {
+            if x != 0 {
+                out.push(b' ');
+            }
+            let bit = (row[x / 8] >> (7 - (x % 8))) & 1;
+            out.push(b'0' + bit);
+        }
+        out.push(b'\n');
+    }
+    out
+}
+
+/// Append the decimal representation of a `u16` to `out` without a
+/// heap allocation. The implementation writes through a 5-byte stack
+/// scratch buffer (max width of `u16::MAX = 65535`).
+#[inline]
+fn write_u16_dec(out: &mut Vec<u8>, mut v: u16) {
+    // Fast path: single digit (very common for clamped low-bit samples).
+    if v < 10 {
+        out.push(b'0' + v as u8);
+        return;
+    }
+    // Fast path: most P2/P3 samples are in 0..=255 — use the u8 writer
+    // which avoids the wide-u16 division entirely.
+    if v < 256 {
+        write_u8_dec(out, v as u8);
+        return;
+    }
+    let mut buf = [0u8; 5];
+    let mut i = buf.len();
+    while v > 0 {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
+    out.extend_from_slice(&buf[i..]);
+}
+
+/// Append the decimal representation of a `u8` to `out`. Three branches
+/// cover the 1 / 2 / 3 digit cases without a loop or division.
+#[inline]
+fn write_u8_dec(out: &mut Vec<u8>, v: u8) {
+    if v < 10 {
+        out.push(b'0' + v);
+    } else if v < 100 {
+        out.push(b'0' + v / 10);
+        out.push(b'0' + v % 10);
+    } else {
+        out.push(b'0' + v / 100);
+        out.push(b'0' + (v / 10) % 10);
+        out.push(b'0' + v % 10);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -120,17 +222,33 @@ pub fn encode_ascii_body(samples: &[u16], width: u32) -> Vec<u8> {
 fn next_uint(input: &[u8], cursor: &mut usize) -> Result<u32> {
     skip_ws_and_comments(input, cursor);
     let start = *cursor;
-    while *cursor < input.len() && input[*cursor].is_ascii_digit() {
-        *cursor += 1;
+    // Accumulate digits directly into a u32 — the UTF-8 + parse round
+    // trip the previous implementation took was a measurable hot-path
+    // tax for ASCII bodies (a 320x240 P3 spends most of its decode time
+    // in this loop). Overflow guard mirrors `str::parse::<u32>`'s
+    // behaviour: any value past `u32::MAX` is rejected.
+    let bytes = input;
+    let mut i = *cursor;
+    let mut v: u32 = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if !c.is_ascii_digit() {
+            break;
+        }
+        let d = (c - b'0') as u32;
+        v = v
+            .checked_mul(10)
+            .and_then(|t| t.checked_add(d))
+            .ok_or_else(|| Error::invalid("Netpbm ASCII: integer overflows u32"))?;
+        i += 1;
     }
-    if *cursor == start {
+    if i == start {
         return Err(Error::invalid(
             "Netpbm ASCII: expected decimal integer in body",
         ));
     }
-    let s = std::str::from_utf8(&input[start..*cursor]).expect("ASCII digits");
-    s.parse::<u32>()
-        .map_err(|e| Error::invalid(format!("Netpbm ASCII: bad integer '{s}': {e}")))
+    *cursor = i;
+    Ok(v)
 }
 
 fn skip_ws_and_comments(input: &[u8], cursor: &mut usize) {
@@ -200,5 +318,81 @@ mod tests {
         let h = parse_header(buf).unwrap();
         let d = decode_ascii(&h, &buf[h.data_offset..]).unwrap();
         assert_eq!(d.samples, vec![100, 50, 75]);
+    }
+
+    #[test]
+    fn ascii_body_round_trips_through_decoder() {
+        // The optimised writer must produce a byte sequence that the
+        // optimised reader can round-trip exactly. Use values that
+        // exercise the 1 / 2 / 3 / 4-digit branches in `write_u16_dec`.
+        let samples: Vec<u16> = vec![0, 9, 10, 99, 100, 999, 1000, 9999, 65535, 1];
+        let body = encode_ascii_body(&samples, samples.len() as u32);
+        // Manually feed it back through `next_uint` (the body has a
+        // trailing LF the parser tolerates as whitespace).
+        let mut cursor = 0usize;
+        let mut got: Vec<u32> = Vec::new();
+        while cursor < body.len() {
+            skip_ws_and_comments(&body, &mut cursor);
+            if cursor >= body.len() {
+                break;
+            }
+            got.push(next_uint(&body, &mut cursor).unwrap());
+        }
+        let want: Vec<u32> = samples.iter().map(|&v| v as u32).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn ascii_decoder_rejects_overflow_integer() {
+        // `next_uint` accumulates into a `u32`; a 13-digit run should
+        // hit the `checked_mul`/`checked_add` overflow guard rather
+        // than truncating silently.
+        let buf = b"P2\n10 1\n65535\n12345678901234 0 0 0 0 0 0 0 0 0\n";
+        let h = parse_header(buf).unwrap();
+        let err = decode_ascii(&h, &buf[h.data_offset..]).unwrap_err();
+        match err {
+            crate::error::PbmError::InvalidData(s) => {
+                assert!(s.contains("overflow") || s.contains("u32"), "got: {s}");
+            }
+            other => panic!("expected InvalidData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_u8_dec_covers_all_digit_widths() {
+        let cases: &[(u8, &[u8])] = &[
+            (0, b"0"),
+            (5, b"5"),
+            (9, b"9"),
+            (10, b"10"),
+            (42, b"42"),
+            (99, b"99"),
+            (100, b"100"),
+            (250, b"250"),
+            (255, b"255"),
+        ];
+        for (v, want) in cases {
+            let mut out = Vec::new();
+            write_u8_dec(&mut out, *v);
+            assert_eq!(out.as_slice(), *want, "u8 {v}");
+        }
+    }
+
+    #[test]
+    fn write_u16_dec_covers_all_digit_widths() {
+        let cases: &[(u16, &[u8])] = &[
+            (0, b"0"),
+            (10, b"10"),
+            (255, b"255"),
+            (256, b"256"),
+            (999, b"999"),
+            (1000, b"1000"),
+            (65535, b"65535"),
+        ];
+        for (v, want) in cases {
+            let mut out = Vec::new();
+            write_u16_dec(&mut out, *v);
+            assert_eq!(out.as_slice(), *want, "u16 {v}");
+        }
     }
 }

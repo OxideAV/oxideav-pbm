@@ -26,7 +26,7 @@
 
 use crate::error::{PbmError as Error, Result};
 
-use crate::ascii::encode_ascii_body;
+use crate::ascii::{encode_ascii_body_bits, encode_ascii_body_u8};
 use crate::binary::encode_p4_body;
 use crate::image::{PbmImage, PbmPixelFormat, PbmPlane};
 
@@ -519,42 +519,35 @@ fn encode_p7_ya8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 fn emit_ascii_pbm_header_and_body(plane: &PbmPlane, w: usize, h: usize) -> Vec<u8> {
-    let row_bytes = w.div_ceil(8);
-    let mut samples: Vec<u16> = Vec::with_capacity(w * h);
-    for y in 0..h {
-        let row = &plane.data[y * plane.stride..y * plane.stride + row_bytes];
-        for x in 0..w {
-            samples.push(((row[x / 8] >> (7 - (x % 8))) & 1) as u16);
-        }
-    }
+    // Direct bit-to-ASCII writer — avoids the temporary `Vec<u16>` the
+    // generic `encode_ascii_body` would otherwise need.
     let mut out = header_pnm(b'1', w, h, None);
-    out.extend(encode_ascii_body(&samples, w as u32));
+    out.extend(encode_ascii_body_bits(&plane.data, plane.stride, w, h));
     out
 }
 
 fn emit_ascii_pgm_8(plane: &PbmPlane, w: usize, h: usize) -> Vec<u8> {
-    let mut samples: Vec<u16> = Vec::with_capacity(w * h);
+    // P2 / Gray8: samples already fit in u8; route through the
+    // u8-specialised writer instead of widening to `Vec<u16>` first.
+    let mut samples: Vec<u8> = Vec::with_capacity(w * h);
     for y in 0..h {
-        let row = &plane.data[y * plane.stride..y * plane.stride + w];
-        for &b in row {
-            samples.push(b as u16);
-        }
+        samples.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w]);
     }
     let mut out = header_pnm(b'2', w, h, Some(255));
-    out.extend(encode_ascii_body(&samples, w as u32));
+    out.extend(encode_ascii_body_u8(&samples, w));
     out
 }
 
 fn emit_ascii_ppm_8(plane: &PbmPlane, w: usize, h: usize) -> Vec<u8> {
-    let mut samples: Vec<u16> = Vec::with_capacity(w * h * 3);
+    // P3 / Rgb24: same idea as P2 — samples are u8 already, so the
+    // u8-specialised writer skips the `Vec<u16>` widen step. The
+    // column-stride is `w * 3` (three samples per pixel).
+    let mut samples: Vec<u8> = Vec::with_capacity(w * h * 3);
     for y in 0..h {
-        let row = &plane.data[y * plane.stride..y * plane.stride + w * 3];
-        for &b in row {
-            samples.push(b as u16);
-        }
+        samples.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w * 3]);
     }
     let mut out = header_pnm(b'3', w, h, Some(255));
-    out.extend(encode_ascii_body(&samples, w as u32 * 3));
+    out.extend(encode_ascii_body_u8(&samples, w * 3));
     out
 }
 

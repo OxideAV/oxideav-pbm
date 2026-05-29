@@ -140,9 +140,11 @@ can A/B-compare SIMD byte-swap (P5/P6 16-bit), branch-free bit packers
 (P4), or lookup-table ASCII writers (P2/P3) against the r176 baseline.
 Indicative apple-silicon numbers on the binary path: ~1.7 GiB/s P6
 8-bit decode, ~6.9 GiB/s P7 16-bit RGBA decode, ~26 GiB/s P7
-8-bit GRAYSCALE_ALPHA encode. The ASCII path is two orders of
-magnitude slower (~100 MiB/s decode, ~50 MiB/s encode) — the headline
-optimisation target if anyone needs P1/P2/P3 throughput.
+8-bit GRAYSCALE_ALPHA encode. Round 189 rewrote the ASCII hot path
+(direct digit writers + u32 accumulator, no `to_string`/`parse`
+round-trips): 320×240 P1 encode 7 MiB/s → ~140 MiB/s, P2 encode
+60 MiB/s → ~320 MiB/s, P3 encode 58 MiB/s → ~295 MiB/s, P2/P3 decode
+both up ≈30-40 %.
 
 ## Registration
 

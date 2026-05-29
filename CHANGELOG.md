@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Round 189: ASCII (P1 / P2 / P3) encoder and decoder hot paths
+  rewritten to remove per-sample heap allocations and `str::parse`
+  trips through UTF-8. `encode_ascii_body` now appends digits to the
+  output buffer through stack scratch instead of `s.to_string()`; two
+  new internal entry points (`encode_ascii_body_u8`,
+  `encode_ascii_body_bits`) skip the temporary `Vec<u16>` widen for the
+  common P2 `Gray8` / P3 `Rgb24` / P1 `MonoBlack` cases (samples are
+  already u8 in the source plane). `next_uint` accumulates digits
+  directly into a `u32` with `checked_mul`/`checked_add` overflow guards
+  (still rejects malformed input with `InvalidData`). Measured against
+  the r176 Criterion baseline on apple-silicon, 320×240 figures:
+  - encode P1 7.3 MiB/s → ~139 MiB/s (≈19× faster).
+  - encode P2 59.6 MiB/s → ~322 MiB/s (≈5.4× faster).
+  - encode P3 58.4 MiB/s → ~295 MiB/s (≈5.1× faster).
+  - decode P2 110.7 MiB/s → ~140 MiB/s (≈1.3× faster).
+  - decode P3 118.8 MiB/s → ~168 MiB/s (≈1.4× faster).
+  Binary paths (P4–P7, PFM) are untouched. Adds four targeted unit
+  tests covering the new `write_u8_dec` / `write_u16_dec` digit-width
+  branches and the overflow-rejection path on `next_uint`.
+
 ### Added
 
 - Round 185: Portable FloatMap (`Pf` / `PF`) decode + encode — the
