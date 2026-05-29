@@ -406,3 +406,82 @@ fn pam_round_trip_blackandwhite() {
     let plane_byte = image.planes[0].data[0];
     assert_eq!(plane_byte, 0b1010_1100);
 }
+
+/// PAM allows arbitrary user-defined `TUPLTYPE` names (the spec is
+/// explicit that the standard six are just defaults; producers like
+/// scientific/HDR-pipeline tools commonly put custom names there, e.g.
+/// `DEPTH_MAP`, `RGBE`, `NORMAL_MAP`, `OPACITY`, multi-channel volumes).
+/// We must (a) accept the file rather than reject it, (b) round-trip the
+/// name verbatim through the header parser, and (c) route the channels
+/// through the depth-fallback layout when the name is non-standard.
+#[test]
+fn p7_custom_tupltype_depth1_decodes_as_gray() {
+    let mut buf = Vec::from(
+        b"P7\nWIDTH 4\nHEIGHT 2\nDEPTH 1\nMAXVAL 255\nTUPLTYPE DEPTH_MAP\nENDHDR\n".as_slice(),
+    );
+    let body: [u8; 8] = [10, 20, 30, 40, 50, 60, 70, 80];
+    buf.extend_from_slice(&body);
+
+    let (image, fmt) = decode_pbm(&buf).unwrap();
+    assert_eq!(fmt, PbmPixelFormat::Gray8);
+    assert_eq!(image.width, 4);
+    assert_eq!(image.height, 2);
+    assert_eq!(&image.planes[0].data[..8], &body);
+}
+
+#[test]
+fn p7_custom_tupltype_depth3_decodes_as_rgb() {
+    // A 1×1 RGBE-named PAM at depth=3, 8-bit: the channels reach the
+    // decoder as plain Rgb24 since `RGBE` isn't one of the six standard
+    // names. The producer is signalling "interpret these channels
+    // yourself"; our decoder hands them through unchanged.
+    let mut buf = Vec::from(
+        b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 3\nMAXVAL 255\nTUPLTYPE RGBE\nENDHDR\n".as_slice(),
+    );
+    buf.extend_from_slice(&[0xAB, 0xCD, 0xEF]);
+    let (image, fmt) = decode_pbm(&buf).unwrap();
+    assert_eq!(fmt, PbmPixelFormat::Rgb24);
+    assert_eq!(image.planes[0].data[..3], [0xAB, 0xCD, 0xEF]);
+}
+
+#[test]
+fn p7_custom_tupltype_depth4_decodes_as_rgba() {
+    // depth=4 + custom name → falls through to Rgba (the depth-4 entry
+    // in the fallback table).
+    let mut buf = Vec::from(
+        b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 4\nMAXVAL 255\nTUPLTYPE NORMAL_MAP\nENDHDR\n".as_slice(),
+    );
+    buf.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+    let (image, fmt) = decode_pbm(&buf).unwrap();
+    assert_eq!(fmt, PbmPixelFormat::Rgba);
+    assert_eq!(image.planes[0].data[..4], [0x11, 0x22, 0x33, 0x44]);
+}
+
+#[test]
+fn p7_custom_tupltype_depth1_16bit_decodes_as_gray16() {
+    // Same as the depth=1 case but maxval > 255 forces 16-bit samples.
+    // On-disk samples are big-endian per the PAM spec; the decoder
+    // returns Gray16Le in memory.
+    let mut buf = Vec::from(
+        b"P7\nWIDTH 2\nHEIGHT 1\nDEPTH 1\nMAXVAL 65535\nTUPLTYPE OPACITY\nENDHDR\n".as_slice(),
+    );
+    // Two big-endian u16 samples: 0x1234, 0xABCD.
+    buf.extend_from_slice(&[0x12, 0x34, 0xAB, 0xCD]);
+    let (image, fmt) = decode_pbm(&buf).unwrap();
+    assert_eq!(fmt, PbmPixelFormat::Gray16Le);
+    // In-memory is little-endian.
+    assert_eq!(&image.planes[0].data[..4], &[0x34, 0x12, 0xCD, 0xAB]);
+}
+
+#[test]
+fn p7_custom_tupltype_depth_outside_range_is_rejected() {
+    // DEPTH 5 is outside the 1..=4 range the parser accepts. Even with
+    // a custom tuple-type name, we must reject — the Custom escape
+    // hatch only bypasses the standard-name vs DEPTH consistency check;
+    // it doesn't widen the depth range.
+    let mut buf = Vec::from(
+        b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 5\nMAXVAL 255\nTUPLTYPE FIVE_CHANNEL\nENDHDR\n".as_slice(),
+    );
+    buf.extend_from_slice(&[0, 0, 0, 0, 0]);
+    assert!(decode_pbm(&buf).is_err());
+}

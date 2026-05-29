@@ -281,21 +281,23 @@ enum RgbaLayout {
 }
 
 fn rgba_layout(h: &Header, depth: usize) -> RgbaLayout {
-    if let Some(t) = h.tupltype {
-        match t {
-            Tupltype::BlackAndWhiteAlpha | Tupltype::GrayscaleAlpha => RgbaLayout::GrayAlpha,
-            Tupltype::RgbAlpha => RgbaLayout::Rgba,
-            Tupltype::Rgb => RgbaLayout::RgbOpaque,
-            _ => RgbaLayout::GrayOpaque,
+    // Standard tuple-types pin the layout; everything else (Custom or
+    // missing TUPLTYPE) falls back on DEPTH.
+    match &h.tupltype {
+        Some(Tupltype::BlackAndWhiteAlpha) | Some(Tupltype::GrayscaleAlpha) => {
+            RgbaLayout::GrayAlpha
         }
-    } else {
-        match depth {
+        Some(Tupltype::RgbAlpha) => RgbaLayout::Rgba,
+        Some(Tupltype::Rgb) => RgbaLayout::RgbOpaque,
+        Some(Tupltype::BlackAndWhite) | Some(Tupltype::Grayscale) => RgbaLayout::GrayOpaque,
+        // Custom(_) or None — DEPTH is authoritative.
+        Some(Tupltype::Custom(_)) | None => match depth {
             1 => RgbaLayout::GrayOpaque,
             2 => RgbaLayout::GrayAlpha,
             3 => RgbaLayout::RgbOpaque,
             4 => RgbaLayout::Rgba,
             _ => RgbaLayout::GrayOpaque,
-        }
+        },
     }
 }
 
@@ -350,32 +352,38 @@ fn pick_pixel_format(h: &Header) -> Result<PbmPixelFormat> {
                 PbmPixelFormat::Rgb24
             }
         }
-        Magic::P7Pam => match (h.tupltype, h.depth, h.maxval > 255) {
-            (Some(Tupltype::BlackAndWhite), _, _) => PbmPixelFormat::MonoBlack,
-            (Some(Tupltype::Grayscale), _, false) => PbmPixelFormat::Gray8,
-            (Some(Tupltype::Grayscale), _, true) => PbmPixelFormat::Gray16Le,
-            (Some(Tupltype::Rgb), _, false) => PbmPixelFormat::Rgb24,
-            (Some(Tupltype::Rgb), _, true) => PbmPixelFormat::Rgb48Le,
-            (Some(Tupltype::GrayscaleAlpha), _, false) => PbmPixelFormat::Ya8,
-            (Some(Tupltype::GrayscaleAlpha), _, true) => PbmPixelFormat::Rgba, // no Ya16 in core
-            (Some(Tupltype::BlackAndWhiteAlpha), _, _) => PbmPixelFormat::Rgba,
-            (Some(Tupltype::RgbAlpha), _, false) => PbmPixelFormat::Rgba,
-            (Some(Tupltype::RgbAlpha), _, true) => PbmPixelFormat::Rgba64Le,
-            // Tuple type omitted — fall back on depth.
-            (None, 1, false) => PbmPixelFormat::Gray8,
-            (None, 1, true) => PbmPixelFormat::Gray16Le,
-            (None, 2, false) => PbmPixelFormat::Ya8,
-            (None, 2, true) => PbmPixelFormat::Rgba,
-            (None, 3, false) => PbmPixelFormat::Rgb24,
-            (None, 3, true) => PbmPixelFormat::Rgb48Le,
-            (None, 4, false) => PbmPixelFormat::Rgba,
-            (None, 4, true) => PbmPixelFormat::Rgba64Le,
-            (_, d, _) => {
-                return Err(Error::unsupported(format!(
-                    "PAM: depth {d} with no recognised TUPLTYPE"
-                )))
+        Magic::P7Pam => {
+            let bits16 = h.maxval > 255;
+            match (&h.tupltype, h.depth, bits16) {
+                (Some(Tupltype::BlackAndWhite), _, _) => PbmPixelFormat::MonoBlack,
+                (Some(Tupltype::Grayscale), _, false) => PbmPixelFormat::Gray8,
+                (Some(Tupltype::Grayscale), _, true) => PbmPixelFormat::Gray16Le,
+                (Some(Tupltype::Rgb), _, false) => PbmPixelFormat::Rgb24,
+                (Some(Tupltype::Rgb), _, true) => PbmPixelFormat::Rgb48Le,
+                (Some(Tupltype::GrayscaleAlpha), _, false) => PbmPixelFormat::Ya8,
+                (Some(Tupltype::GrayscaleAlpha), _, true) => PbmPixelFormat::Rgba, // no Ya16 in core
+                (Some(Tupltype::BlackAndWhiteAlpha), _, _) => PbmPixelFormat::Rgba,
+                (Some(Tupltype::RgbAlpha), _, false) => PbmPixelFormat::Rgba,
+                (Some(Tupltype::RgbAlpha), _, true) => PbmPixelFormat::Rgba64Le,
+                // Tuple type omitted OR user-defined / non-standard:
+                // route the channels through the depth-based fallback
+                // (the spec explicitly permits arbitrary TUPLTYPE names,
+                // in which case DEPTH is the authoritative channel count).
+                (None, 1, false) | (Some(Tupltype::Custom(_)), 1, false) => PbmPixelFormat::Gray8,
+                (None, 1, true) | (Some(Tupltype::Custom(_)), 1, true) => PbmPixelFormat::Gray16Le,
+                (None, 2, false) | (Some(Tupltype::Custom(_)), 2, false) => PbmPixelFormat::Ya8,
+                (None, 2, true) | (Some(Tupltype::Custom(_)), 2, true) => PbmPixelFormat::Rgba,
+                (None, 3, false) | (Some(Tupltype::Custom(_)), 3, false) => PbmPixelFormat::Rgb24,
+                (None, 3, true) | (Some(Tupltype::Custom(_)), 3, true) => PbmPixelFormat::Rgb48Le,
+                (None, 4, false) | (Some(Tupltype::Custom(_)), 4, false) => PbmPixelFormat::Rgba,
+                (None, 4, true) | (Some(Tupltype::Custom(_)), 4, true) => PbmPixelFormat::Rgba64Le,
+                (_, d, _) => {
+                    return Err(Error::unsupported(format!(
+                        "PAM: depth {d} outside the supported 1..=4 range"
+                    )))
+                }
             }
-        },
+        }
     })
 }
 

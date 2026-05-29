@@ -96,7 +96,7 @@ fn pick_advertised_format(h: &crate::header::Header) -> PixelFormat {
                 PixelFormat::Rgb24
             }
         }
-        Magic::P7Pam => match (h.tupltype, h.depth, h.maxval > 255) {
+        Magic::P7Pam => match (&h.tupltype, h.depth, h.maxval > 255) {
             (Some(Tupltype::BlackAndWhite), _, _) => PixelFormat::MonoBlack,
             (Some(Tupltype::Grayscale), _, false) => PixelFormat::Gray8,
             (Some(Tupltype::Grayscale), _, true) => PixelFormat::Gray16Le,
@@ -107,12 +107,15 @@ fn pick_advertised_format(h: &crate::header::Header) -> PixelFormat {
             (Some(Tupltype::BlackAndWhiteAlpha), _, _) => PixelFormat::Rgba,
             (Some(Tupltype::RgbAlpha), _, false) => PixelFormat::Rgba,
             (Some(Tupltype::RgbAlpha), _, true) => PixelFormat::Rgba64Le,
-            (None, 1, false) => PixelFormat::Gray8,
-            (None, 1, true) => PixelFormat::Gray16Le,
-            (None, 3, false) => PixelFormat::Rgb24,
-            (None, 3, true) => PixelFormat::Rgb48Le,
-            (None, 4, false) => PixelFormat::Rgba,
-            (None, 4, true) => PixelFormat::Rgba64Le,
+            // None and Custom(_) — DEPTH drives the advertised format.
+            (None, 1, false) | (Some(Tupltype::Custom(_)), 1, false) => PixelFormat::Gray8,
+            (None, 1, true) | (Some(Tupltype::Custom(_)), 1, true) => PixelFormat::Gray16Le,
+            (None, 2, false) | (Some(Tupltype::Custom(_)), 2, false) => PixelFormat::Ya8,
+            (None, 2, true) | (Some(Tupltype::Custom(_)), 2, true) => PixelFormat::Rgba,
+            (None, 3, false) | (Some(Tupltype::Custom(_)), 3, false) => PixelFormat::Rgb24,
+            (None, 3, true) | (Some(Tupltype::Custom(_)), 3, true) => PixelFormat::Rgb48Le,
+            (None, 4, false) | (Some(Tupltype::Custom(_)), 4, false) => PixelFormat::Rgba,
+            (None, 4, true) | (Some(Tupltype::Custom(_)), 4, true) => PixelFormat::Rgba64Le,
             _ => PixelFormat::Rgba,
         },
     }

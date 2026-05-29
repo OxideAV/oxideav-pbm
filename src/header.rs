@@ -79,9 +79,18 @@ impl Magic {
     }
 }
 
-/// PAM tuple type. The man page enumerates six standard names; arbitrary
-/// user-defined types are deferred to round 2.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// PAM tuple type. The man page enumerates six standard names with fixed
+/// channel counts; the PAM format spec also explicitly permits arbitrary
+/// **user-defined** names (e.g. `DEPTH_MAP`, `RGBE`, `NORMAL_MAP`,
+/// `OPACITY`, scientific multi-channel volumes), in which case the
+/// caller is responsible for interpreting the channels — we round-trip
+/// the name verbatim and route the pixels through the depth-based
+/// fallback used when `TUPLTYPE` is omitted entirely.
+///
+/// `Custom(_)` always implies "no standard semantic" — the channel
+/// count is whatever the header's `DEPTH` says (1..=4) and the decoder
+/// falls back to opaque-gray / gray-alpha / RGB / RGBA based on that.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tupltype {
     BlackAndWhite,
     Grayscale,
@@ -89,26 +98,33 @@ pub enum Tupltype {
     BlackAndWhiteAlpha,
     GrayscaleAlpha,
     RgbAlpha,
+    /// A non-standard / user-defined tuple-type name. Preserved verbatim
+    /// for round-trip; channel layout is determined by `DEPTH` alone.
+    Custom(String),
 }
 
 impl Tupltype {
+    /// Parse a TUPLTYPE name. Recognises the six standard names; any
+    /// other non-empty ASCII token round-trips as [`Tupltype::Custom`].
     pub fn parse(name: &str) -> Result<Self> {
-        Ok(match name {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(Error::invalid("PAM: TUPLTYPE value is empty"));
+        }
+        Ok(match trimmed {
             "BLACKANDWHITE" => Self::BlackAndWhite,
             "GRAYSCALE" => Self::Grayscale,
             "RGB" => Self::Rgb,
             "BLACKANDWHITE_ALPHA" => Self::BlackAndWhiteAlpha,
             "GRAYSCALE_ALPHA" => Self::GrayscaleAlpha,
             "RGB_ALPHA" => Self::RgbAlpha,
-            other => {
-                return Err(Error::unsupported(format!(
-                    "PAM: tuple type '{other}' not supported in round 1"
-                )))
-            }
+            other => Self::Custom(other.to_string()),
         })
     }
 
-    pub fn name(self) -> &'static str {
+    /// Wire-name for the tuple type. Borrows the inner `String` for the
+    /// custom case.
+    pub fn name(&self) -> &str {
         match self {
             Self::BlackAndWhite => "BLACKANDWHITE",
             Self::Grayscale => "GRAYSCALE",
@@ -116,16 +132,28 @@ impl Tupltype {
             Self::BlackAndWhiteAlpha => "BLACKANDWHITE_ALPHA",
             Self::GrayscaleAlpha => "GRAYSCALE_ALPHA",
             Self::RgbAlpha => "RGB_ALPHA",
+            Self::Custom(s) => s.as_str(),
         }
     }
 
-    pub fn channels(self) -> usize {
-        match self {
+    /// Channels-per-pixel implied by the **standard** tuple type. The
+    /// custom case returns `None` — the caller falls back to the
+    /// header's `DEPTH` field, which is the only authoritative source
+    /// for arbitrary tuple-type files.
+    pub fn channels(&self) -> Option<usize> {
+        Some(match self {
             Self::BlackAndWhite | Self::Grayscale => 1,
             Self::BlackAndWhiteAlpha | Self::GrayscaleAlpha => 2,
             Self::Rgb => 3,
             Self::RgbAlpha => 4,
-        }
+            Self::Custom(_) => return None,
+        })
+    }
+
+    /// `true` for [`Tupltype::Custom`] — a non-standard tuple-type name
+    /// that should round-trip verbatim but doesn't pin a channel layout.
+    pub fn is_custom(&self) -> bool {
+        matches!(self, Self::Custom(_))
     }
 }
 
@@ -286,13 +314,18 @@ fn parse_pam_header(input: &[u8]) -> Result<Header> {
             "PAM: DEPTH {depth} out of round-1 range 1..=4"
         )));
     }
-    if let Some(t) = tupltype {
-        if t.channels() as u32 != depth {
-            return Err(Error::invalid(format!(
-                "PAM: TUPLTYPE {} expects depth {}, header says {depth}",
-                t.name(),
-                t.channels()
-            )));
+    if let Some(t) = &tupltype {
+        // Only the six standard tuple-types pin a channel count. A
+        // user-defined `Custom(_)` name is honoured at whatever `DEPTH`
+        // the header advertises (1..=4, already range-checked above).
+        if let Some(want) = t.channels() {
+            if want as u32 != depth {
+                return Err(Error::invalid(format!(
+                    "PAM: TUPLTYPE {} expects depth {}, header says {depth}",
+                    t.name(),
+                    want
+                )));
+            }
         }
     }
     Ok(Header {
@@ -484,5 +517,54 @@ mod tests {
     #[test]
     fn rejects_unknown_magic() {
         assert!(parse_header(b"P9\n2 2\n\x00\x00\x00\x00").is_err());
+    }
+
+    #[test]
+    fn accepts_user_defined_tupltype() {
+        // PAM lets the producer name an arbitrary TUPLTYPE (depth maps,
+        // RGBE light probes, scientific multi-channel volumes, ...).
+        // We round-trip the name verbatim and let DEPTH drive the
+        // channel count.
+        let buf = b"P7\nWIDTH 2\nHEIGHT 1\nDEPTH 3\nMAXVAL 255\nTUPLTYPE DEPTH_MAP\nENDHDR\nABCDEF";
+        let h = parse_header(buf).unwrap();
+        assert_eq!(h.magic, Magic::P7Pam);
+        assert_eq!(h.depth, 3);
+        assert_eq!(h.maxval, 255);
+        match &h.tupltype {
+            Some(Tupltype::Custom(s)) => assert_eq!(s, "DEPTH_MAP"),
+            other => panic!("expected Custom(DEPTH_MAP), got {other:?}"),
+        }
+        assert!(h.tupltype.as_ref().unwrap().is_custom());
+        assert_eq!(h.tupltype.as_ref().unwrap().channels(), None);
+        assert_eq!(h.tupltype.as_ref().unwrap().name(), "DEPTH_MAP");
+        assert_eq!(&buf[h.data_offset..], b"ABCDEF");
+    }
+
+    #[test]
+    fn custom_tupltype_with_any_depth_in_range() {
+        // depth=4 → routes through depth-fallback (no Custom <-> depth check).
+        let buf =
+            b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGBE\nENDHDR\n\x01\x02\x03\x04";
+        let h = parse_header(buf).unwrap();
+        assert_eq!(h.tupltype.as_ref().map(|t| t.name()), Some("RGBE"));
+        assert_eq!(h.depth, 4);
+    }
+
+    #[test]
+    fn rejects_empty_tupltype_value() {
+        // Empty TUPLTYPE is a malformed header — not a Custom("") variant.
+        let buf = b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 1\nMAXVAL 255\nTUPLTYPE\nENDHDR\n\x00";
+        let h = parse_header(buf);
+        assert!(h.is_err(), "expected error, got {h:?}");
+    }
+
+    #[test]
+    fn standard_tupltype_channel_check_still_applies() {
+        // DEPTH 4 with RGB (which pins 3 channels) is still rejected —
+        // the Custom escape hatch doesn't loosen the standard-name check.
+        let buf =
+            b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB\nENDHDR\n\x00\x00\x00\x00";
+        let h = parse_header(buf);
+        assert!(h.is_err(), "expected error, got {h:?}");
     }
 }

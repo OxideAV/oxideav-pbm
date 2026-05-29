@@ -16,7 +16,7 @@ sources: the Netpbm man pages (`pbm(5)`, `pgm(5)`, `ppm(5)`, `pnm(5)`,
 | P4    | PBM  | Binary   | 1 (1-bit)  | 1         | `MonoBlack` |
 | P5    | PGM  | Binary   | 1          | 8 / 16    | `Gray8` / `Gray16Le` |
 | P6    | PPM  | Binary   | 3 (RGB)    | 8 / 16    | `Rgb24` / `Rgb48Le` |
-| P7    | PAM  | Binary   | 1-4 + 6 standard `TUPLTYPE`s | 1-16 | `MonoBlack` / `Gray*` / `Rgb*` / `Ya8` / `Rgba` / `Rgba64Le` |
+| P7    | PAM  | Binary   | 1-4, any `TUPLTYPE` (6 standard + arbitrary) | 1-16 | `MonoBlack` / `Gray*` / `Rgb*` / `Ya8` / `Rgba` / `Rgba64Le` |
 
 Comments (`# … LF`) are tolerated everywhere the spec permits — both in
 headers and (for ASCII variants) in the body between samples. Any ASCII
@@ -50,11 +50,21 @@ selector covering every magic individually (`Pnm1` / `Pnm2` / `Pnm3` /
 (including the GRAYSCALE-as-PAM case that `encode_pbm` would otherwise
 route to P5).
 
-## Round 1 deferrals
+## PAM tuple-type handling
 
-* User-defined `TUPLTYPE` strings (round 1 supports the six standard
-  names `BLACKANDWHITE`, `GRAYSCALE`, `RGB`, `BLACKANDWHITE_ALPHA`,
-  `GRAYSCALE_ALPHA`, `RGB_ALPHA` only).
+The six standard `TUPLTYPE` names (`BLACKANDWHITE`, `GRAYSCALE`, `RGB`,
+`BLACKANDWHITE_ALPHA`, `GRAYSCALE_ALPHA`, `RGB_ALPHA`) pin a fixed
+channel layout; `pam(5)` also permits arbitrary user-defined names so
+producers can carry depth maps, RGBE light probes, normal maps, opacity
+masks, or scientific multi-channel volumes. The parser round-trips any
+non-standard name through a `Tupltype::Custom(String)` variant and
+routes the pixels through the same depth-based fallback used when
+`TUPLTYPE` is omitted entirely — channels reach the caller as
+`Gray8` / `Gray16Le` / `Ya8` / `Rgb24` / `Rgb48Le` / `Rgba` /
+`Rgba64Le` based on `DEPTH` (1..=4) and `MAXVAL`.
+
+## Round-1 deferrals
+
 * 16-bit `GRAYSCALE_ALPHA` is widened to `Rgba` on decode (no `Ya16`
   variant in `oxideav-core` yet).
 

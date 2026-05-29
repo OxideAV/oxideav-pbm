@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 183: user-defined `TUPLTYPE` support. The PAM spec (pam(5))
+  explicitly permits arbitrary tuple-type names beyond the six standard
+  ones (`BLACKANDWHITE` / `GRAYSCALE` / `RGB` / `BLACKANDWHITE_ALPHA` /
+  `GRAYSCALE_ALPHA` / `RGB_ALPHA`) — producers in HDR / depth-map /
+  normal-map / scientific-imaging pipelines routinely emit names like
+  `DEPTH_MAP`, `RGBE`, `NORMAL_MAP`, `OPACITY`, and arbitrary
+  multi-channel volumes. The header parser previously rejected every
+  such file with `Unsupported`; it now round-trips the name verbatim
+  through a new `Tupltype::Custom(String)` variant and routes the
+  channels through the existing depth-based fallback layout (the same
+  table used when `TUPLTYPE` is omitted entirely). Standard names
+  still pin their channel layout, and the consistency check
+  (`TUPLTYPE RGB` with `DEPTH 4` etc.) is preserved for them. Empty
+  `TUPLTYPE` values are rejected with `InvalidData` instead of being
+  silently coerced into `Custom("")`. Drops `Copy` from `Tupltype`
+  (the `Custom` arm holds an owned `String`); the type stays `Clone +
+  PartialEq + Eq` and `Tupltype::name()` / `Tupltype::channels()` now
+  take `&self`. Adds five header-level unit tests
+  (`accepts_user_defined_tupltype`,
+  `custom_tupltype_with_any_depth_in_range`,
+  `rejects_empty_tupltype_value`,
+  `standard_tupltype_channel_check_still_applies`) plus five
+  integration tests in `tests/encode_roundtrip.rs` exercising the full
+  `decode_pbm` pipeline at depths 1 / 3 / 4 at both 8-bit and 16-bit,
+  including the depth-outside-range rejection. Closes the round-1
+  deferral listed in the README.
+
 - Round 176 (depth-mode benchmarks): three Criterion bench binaries
   under `benches/{decode,encode,roundtrip}.rs` covering every binary
   magic (P4/P5/P6/P7) at 8 and 16-bit plus the three ASCII magics
