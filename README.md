@@ -78,6 +78,29 @@ available body length before allocating. A daily CI run
 (`.github/workflows/fuzz.yml`, 30 min budget split across the three
 targets) keeps the contract enforced.
 
+## Benchmarks
+
+Three Criterion bench binaries cover the codec hot paths
+(`benches/{decode,encode,roundtrip}.rs`). Inputs are synthesised
+in-bench from a deterministic xorshift seed — no fixture files are
+committed. Run:
+
+```
+cargo bench -p oxideav-pbm --bench decode
+cargo bench -p oxideav-pbm --bench encode
+cargo bench -p oxideav-pbm --bench roundtrip
+```
+
+The matrix covers every binary magic (P4/P5/P6/P7) at 8 and 16-bit
+plus the three ASCII magics (P1/P2/P3) so future optimisation rounds
+can A/B-compare SIMD byte-swap (P5/P6 16-bit), branch-free bit packers
+(P4), or lookup-table ASCII writers (P2/P3) against the r176 baseline.
+Indicative apple-silicon numbers on the binary path: ~1.7 GiB/s P6
+8-bit decode, ~6.9 GiB/s P7 16-bit RGBA decode, ~26 GiB/s P7
+8-bit GRAYSCALE_ALPHA encode. The ASCII path is two orders of
+magnitude slower (~100 MiB/s decode, ~50 MiB/s encode) — the headline
+optimisation target if anyone needs P1/P2/P3 throughput.
+
 ## Registration
 
 ```rust

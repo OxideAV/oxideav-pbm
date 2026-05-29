@@ -29,3 +29,32 @@ default = ["registry"]
 # into the `oxideav` framework registry. Default-on; turn off for
 # image-library use-cases that just want the standalone `decode_pbm` API.
 registry = ["dep:oxideav-core"]
+
+[dev-dependencies]
+# Round 176 (depth-mode benchmarks): Criterion drives the three bench
+# harnesses (`decode`, `encode`, `roundtrip`) that future encoder /
+# decoder rounds use to A/B their algorithm tweaks (SIMD byte-swap for
+# 16-bit P5/P6, lookup-table ASCII writer for P2/P3, branch-free P4
+# bit packer). Pinned to the same 0.5 line the other OxideAV crates
+# with benches (png / flac / tiff / cinepak / tta / magicyuv / h264 /
+# pixfmt) already track.
+criterion = "0.5"
+
+# Round 176 benches. Each binary lives in `benches/<name>.rs` and is
+# self-contained (no committed fixture files — every input is
+# synthesised in-bench from a deterministic xorshift seed, then fed
+# through the crate's own production encoder/decoder via the public
+# `oxideav_pbm::{encode_pbm, decode_pbm, encode_pbm_ascii,
+# encode_pbm_with_format}` API). Run with:
+#     cargo bench -p oxideav-pbm --bench <name>
+[[bench]]
+name = "decode"
+harness = false
+
+[[bench]]
+name = "encode"
+harness = false
+
+[[bench]]
+name = "roundtrip"
+harness = false

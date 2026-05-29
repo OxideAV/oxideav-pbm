@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 176 (depth-mode benchmarks): three Criterion bench binaries
+  under `benches/{decode,encode,roundtrip}.rs` covering every binary
+  magic (P4/P5/P6/P7) at 8 and 16-bit plus the three ASCII magics
+  (P1/P2/P3). Inputs are synthesised in-bench from a deterministic
+  xorshift seed (no committed fixtures) and pushed through the public
+  `encode_pbm` / `encode_pbm_ascii` / `encode_pbm_with_format` /
+  `decode_pbm` API. Establishes the r176 throughput baseline so future
+  optimisation rounds (SIMD byte-swap for 16-bit P5/P6, lookup-table
+  ASCII writer for P2/P3, branch-free P4 bit packer) can A/B-compare.
+  Run with `cargo bench -p oxideav-pbm --bench <name>`. `criterion =
+  "0.5"` pinned to the same line as the other OxideAV crates with
+  benches (png / flac / tiff / cinepak / tta / magicyuv / h264 /
+  pixfmt). Standalone (`--no-default-features`) build still compiles
+  unchanged — benches are dev-only and the `dev-dependencies` block
+  carries no `oxideav-core` dependency.
+
 - `fuzz/` cargo-fuzz harness with three libfuzzer targets covering the
   parser surface end-to-end (`decode`), the header-only state machine
   (`header`), and the encoder × every `PbmEncodeFormat` pair
