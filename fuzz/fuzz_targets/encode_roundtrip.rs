@@ -33,7 +33,7 @@ use oxideav_pbm::{
 };
 
 fn select_pixel_format(b: u8) -> PbmPixelFormat {
-    match b % 9 {
+    match b % 11 {
         0 => PbmPixelFormat::MonoBlack,
         1 => PbmPixelFormat::Gray8,
         2 => PbmPixelFormat::Gray16Le,
@@ -42,12 +42,14 @@ fn select_pixel_format(b: u8) -> PbmPixelFormat {
         5 => PbmPixelFormat::Rgba,
         6 => PbmPixelFormat::Bgra,
         7 => PbmPixelFormat::Rgba64Le,
-        _ => PbmPixelFormat::Ya8,
+        8 => PbmPixelFormat::Ya8,
+        9 => PbmPixelFormat::GrayF32,
+        _ => PbmPixelFormat::RgbF32,
     }
 }
 
 fn select_encode_format(b: u8) -> PbmEncodeFormat {
-    match b % 9 {
+    match b % 10 {
         0 => PbmEncodeFormat::AutoBinary,
         1 => PbmEncodeFormat::AutoAscii,
         2 => PbmEncodeFormat::Pnm1,
@@ -56,7 +58,8 @@ fn select_encode_format(b: u8) -> PbmEncodeFormat {
         5 => PbmEncodeFormat::Pnm4,
         6 => PbmEncodeFormat::Pnm5,
         7 => PbmEncodeFormat::Pnm6,
-        _ => PbmEncodeFormat::Pam7,
+        8 => PbmEncodeFormat::Pam7,
+        _ => PbmEncodeFormat::Pfm,
     }
 }
 
@@ -72,6 +75,8 @@ fn min_stride(format: PbmPixelFormat, width: usize) -> usize {
         PbmPixelFormat::Rgba | PbmPixelFormat::Bgra => width * 4,
         PbmPixelFormat::Rgb48Le => width * 6,
         PbmPixelFormat::Rgba64Le => width * 8,
+        PbmPixelFormat::GrayF32 => width * 4,
+        PbmPixelFormat::RgbF32 => width * 12,
     }
 }
 

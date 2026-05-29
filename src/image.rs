@@ -38,6 +38,18 @@ pub enum PbmPixelFormat {
     Rgba64Le,
     /// 8-bit grayscale + alpha (`Y, A`), 2 bytes per pixel.
     Ya8,
+    /// Single-channel IEEE-754 binary32 (32-bit float) grayscale, one
+    /// 4-byte sample per pixel. High-dynamic-range linear light. The
+    /// plane stores each float in **little-endian** byte order (matching
+    /// the crate's other `*Le` variants) regardless of the on-disk byte
+    /// order it was read from. Decoded from / encoded to the `Pf`
+    /// Portable FloatMap form (see [`crate::pfm`]).
+    GrayF32,
+    /// 3-channel (R, G, B interleaved) IEEE-754 binary32 (32-bit float)
+    /// colour, 12 bytes per pixel. High-dynamic-range linear light. Each
+    /// float is stored **little-endian** in the plane. Decoded from /
+    /// encoded to the `PF` Portable FloatMap form (see [`crate::pfm`]).
+    RgbF32,
 }
 
 /// One image plane: row-major bytes plus the row stride in bytes.

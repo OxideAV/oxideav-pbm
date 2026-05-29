@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 185: Portable FloatMap (`Pf` / `PF`) decode + encode — the
+  floating-point member of the family, storing raw IEEE-754 binary32
+  samples (1 channel for `Pf` grayscale, 3 interleaved R/G/B for `PF`
+  colour). Reference: `docs/image/netpbm/pfm-portable-floatmap.md`
+  (Debevec PFM reference). New `PbmPixelFormat::GrayF32` (4 B/px) and
+  `PbmPixelFormat::RgbF32` (12 B/px) variants store float samples
+  little-endian in memory. The PFM header is parsed by a dedicated strict
+  reader: exactly three LF-terminated lines (magic, `width height`,
+  scale) with **no comments** and **no CRLF** — embedded `#`, carriage
+  returns, and missing LF terminators are rejected. The scale line's sign
+  selects byte order (negative ⇒ little-endian, positive ⇒ big-endian)
+  and its absolute value is preserved as an advisory scale factor
+  (reported, not applied to the pixels). On-disk rows are bottom-to-top;
+  the codec flips them to a conventional top-to-bottom in-memory plane
+  and normalises big-endian samples to the little-endian in-memory
+  contract. New public API: `decode_pfm` / `encode_pfm` /
+  `encode_pfm_plane` plus the `PfmHeaderInfo` (byte order + scale +
+  channels) and `header::PfmInfo` types; the unified `decode_pbm` /
+  `encode_pbm` entry points route `Pf` / `PF` automatically (encoding
+  defaults to little-endian, unit scale), and `PbmEncodeFormat::Pfm`
+  pins the float form explicitly. The container probe/extension layer
+  recognises the `Pf` / `PF` magics and the `.pfm` extension; because the
+  two float formats have no `oxideav_core::PixelFormat` counterpart,
+  `pbm_to_pixel_format` now returns `Option<PixelFormat>` (`None` for the
+  float maps) and the demuxer advertises no pixel format for PFM streams
+  (the decoder is self-describing from the byte stream). Adds header-level
+  unit tests (PFM big/little-endian parse, CRLF rejection, comment
+  rejection, NaN-scale rejection, zero-dimension rejection), body-level
+  unit tests in `src/pfm.rs` (gray/RGB round-trips at both byte orders,
+  non-unit scale, bottom-to-top flip, big-endian disk-byte swap,
+  truncation/format/scale rejection), and `tests/pfm_roundtrip.rs`
+  integration coverage through the public API. The standalone
+  (`--no-default-features`) build compiles unchanged.
+
 - Round 183: user-defined `TUPLTYPE` support. The PAM spec (pam(5))
   explicitly permits arbitrary tuple-type names beyond the six standard
   ones (`BLACKANDWHITE` / `GRAYSCALE` / `RGB` / `BLACKANDWHITE_ALPHA` /

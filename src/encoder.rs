@@ -179,6 +179,11 @@ pub enum PbmEncodeFormat {
     /// the encoder always emits P4 for `MonoBlack` since P7
     /// `BLACKANDWHITE` would be a bigger header for the same payload).
     Pam7,
+    /// Force Portable FloatMap (`Pf` for `GrayF32`, `PF` for `RgbF32`).
+    /// Only valid for the two float pixel formats; emits little-endian
+    /// samples with a unit scale. Callers needing an explicit byte order
+    /// or scale use [`crate::pfm::encode_pfm`] directly.
+    Pfm,
 }
 
 /// Encode a [`PbmImage`] with an explicit choice of output magic.
@@ -250,6 +255,19 @@ pub fn encode_pbm_with_format(image: &PbmImage, format: PbmEncodeFormat) -> Resu
                 "PBM encoder: pixel format {other:?} cannot be emitted as P7"
             ))),
         },
+        PbmEncodeFormat::Pfm => match image.pixel_format {
+            PbmPixelFormat::GrayF32 | PbmPixelFormat::RgbF32 => crate::pfm::encode_pfm_plane(
+                plane,
+                image.pixel_format,
+                image.width,
+                image.height,
+                true,
+                1.0,
+            ),
+            other => Err(Error::unsupported(format!(
+                "PBM encoder: pixel format {other:?} cannot be emitted as a Portable FloatMap"
+            ))),
+        },
     }
 }
 
@@ -278,6 +296,12 @@ pub fn encode_pbm_plane(
         PbmPixelFormat::Bgra => encode_p7_bgra8(plane, w, h),
         PbmPixelFormat::Rgba64Le => encode_p7_rgba16(plane, w, h),
         PbmPixelFormat::Ya8 => encode_p7_ya8(plane, w, h),
+        // Float maps have no integer Netpbm form — emit Portable
+        // FloatMap (`Pf` / `PF`). Default to little-endian (no byte swap
+        // from the little-endian in-memory plane) with a unit scale.
+        PbmPixelFormat::GrayF32 | PbmPixelFormat::RgbF32 => {
+            crate::pfm::encode_pfm_plane(plane, format, width, height, true, 1.0)
+        }
     }
 }
 

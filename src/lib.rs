@@ -1,9 +1,13 @@
-//! Pure-Rust Netpbm (PBM/PGM/PPM/PNM/PAM) image codec + container.
+//! Pure-Rust Netpbm (PBM/PGM/PPM/PNM/PAM) + Portable FloatMap image
+//! codec + container.
 //!
 //! Covers all eight Netpbm magic numbers — the seven classic PNM
-//! variants plus PAM (P7) — in one self-contained crate. Spec sources
-//! are the Netpbm man pages: `pbm(5)`, `pgm(5)`, `ppm(5)`, `pnm(5)`,
-//! `pam(5)`. No external implementation source was consulted.
+//! variants plus PAM (P7) — and the floating-point Portable FloatMap
+//! sibling (`Pf` / `PF`) in one self-contained crate. Spec sources are
+//! the Netpbm man pages (`pbm(5)`, `pgm(5)`, `ppm(5)`, `pnm(5)`,
+//! `pam(5)`) and the Debevec PFM reference
+//! (`docs/image/netpbm/pfm-portable-floatmap.md`). No external
+//! implementation source was consulted.
 //!
 //! | Magic | Name | Encoding | Channels | Bit depth |
 //! |-------|------|----------|----------|-----------|
@@ -14,11 +18,18 @@
 //! | P5    | PGM  | Binary   | 1          | 8 or 16 |
 //! | P6    | PPM  | Binary   | 3 (RGB)    | 8 or 16 |
 //! | P7    | PAM  | Binary   | 1-4 (depth + tupltype) | 1-16 (arbitrary `MAXVAL`) |
+//! | `Pf`  | PFM  | Binary   | 1 (gray)   | 32 (IEEE-754 float) |
+//! | `PF`  | PFM  | Binary   | 3 (RGB)    | 32 (IEEE-754 float) |
 //!
-//! All seven magics decode to a [`PbmImage`] tagged with one of the
-//! [`PbmPixelFormat`] variants; the encoder picks the closest binary
-//! form (P4/P5/P6/P7) for any supported pixel format. ASCII-form
-//! output is also available via [`encode_pbm_ascii`].
+//! Every PNM/PAM magic decodes to a [`PbmImage`] tagged with one of the
+//! integer [`PbmPixelFormat`] variants; the encoder picks the closest
+//! binary form (P4/P5/P6/P7) for any supported pixel format. ASCII-form
+//! output is also available via [`encode_pbm_ascii`]. The two PFM magics
+//! decode/encode IEEE-754 binary32 samples (the
+//! [`PbmPixelFormat::GrayF32`] / [`PbmPixelFormat::RgbF32`] variants) via
+//! the dedicated [`decode_pfm`] / [`encode_pfm`] entry points (see the
+//! [`pfm`] module); [`decode_pbm`] / [`encode_pbm`] also route `Pf` / `PF`
+//! to that path automatically.
 //!
 //! Comments (`# … LF`) are tolerated everywhere the Netpbm spec
 //! permits them — in headers and in the bodies of P1/P2/P3 — and any
@@ -42,6 +53,7 @@ pub mod encoder;
 pub mod error;
 pub mod header;
 pub mod image;
+pub mod pfm;
 #[cfg(feature = "registry")]
 pub mod registry;
 
@@ -55,8 +67,9 @@ pub use encoder::{
     PbmEncodeFormat,
 };
 pub use error::{PbmError, Result};
-pub use header::{parse_header, Header, Magic, Tupltype};
+pub use header::{parse_header, Header, Magic, PfmInfo, Tupltype};
 pub use image::{PbmImage, PbmPixelFormat, PbmPlane};
+pub use pfm::{decode_pfm, encode_pfm, encode_pfm_plane, PfmHeaderInfo};
 
 #[cfg(feature = "registry")]
 pub use registry::{

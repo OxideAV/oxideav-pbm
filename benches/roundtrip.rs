@@ -49,6 +49,8 @@ fn build_filled(width: u32, height: u32, format: PbmPixelFormat, seed: u32) -> P
         PbmPixelFormat::Rgba | PbmPixelFormat::Bgra => (w * 4, w * h * 4),
         PbmPixelFormat::Rgba64Le => (w * 8, w * h * 8),
         PbmPixelFormat::Ya8 => (w * 2, w * h * 2),
+        PbmPixelFormat::GrayF32 => (w * 4, w * h * 4),
+        PbmPixelFormat::RgbF32 => (w * 12, w * h * 12),
     };
     let mut data = vec![0u8; len];
     let mut state = seed;

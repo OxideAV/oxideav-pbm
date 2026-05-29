@@ -17,11 +17,14 @@ sources: the Netpbm man pages (`pbm(5)`, `pgm(5)`, `ppm(5)`, `pnm(5)`,
 | P5    | PGM  | Binary   | 1          | 8 / 16    | `Gray8` / `Gray16Le` |
 | P6    | PPM  | Binary   | 3 (RGB)    | 8 / 16    | `Rgb24` / `Rgb48Le` |
 | P7    | PAM  | Binary   | 1-4, any `TUPLTYPE` (6 standard + arbitrary) | 1-16 | `MonoBlack` / `Gray*` / `Rgb*` / `Ya8` / `Rgba` / `Rgba64Le` |
+| `Pf`  | PFM  | Binary   | 1 (gray)   | 32 float  | `GrayF32` |
+| `PF`  | PFM  | Binary   | 3 (RGB)    | 32 float  | `RgbF32` |
 
-Comments (`# … LF`) are tolerated everywhere the spec permits — both in
-headers and (for ASCII variants) in the body between samples. Any ASCII
-whitespace separates header tokens and ASCII samples. P1 accepts both
-canonical token style and whitespace-free digit runs.
+Comments (`# … LF`) are tolerated everywhere the integer PNM/PAM spec
+permits them — both in headers and (for ASCII variants) in the body
+between samples. Any ASCII whitespace separates header tokens and ASCII
+samples. P1 accepts both canonical token style and whitespace-free digit
+runs. The Portable FloatMap header is the strict exception (see below).
 
 ## Encode
 
@@ -37,6 +40,8 @@ Picks the closest binary form for the input `PixelFormat`:
 | `Rgba`/`Bgra`  | P7 RGB_ALPHA (maxval 255) |
 | `Rgba64Le`     | P7 RGB_ALPHA (maxval 65535) |
 | `Ya8`          | P7 GRAYSCALE_ALPHA (maxval 255) |
+| `GrayF32`      | `Pf` Portable FloatMap (little-endian, scale -1.0) |
+| `RgbF32`       | `PF` Portable FloatMap (little-endian, scale -1.0) |
 
 Plain ASCII output (P1/P2/P3) is available via
 [`encoder::encode_pbm_ascii`] — the binary path is always preferred
@@ -45,10 +50,38 @@ for size.
 For callers that need to pin the on-disk magic explicitly,
 [`encoder::encode_pbm_with_format`] takes a [`encoder::PbmEncodeFormat`]
 selector covering every magic individually (`Pnm1` / `Pnm2` / `Pnm3` /
-`Pnm4` / `Pnm5` / `Pnm6` / `Pam7`) plus the convenience `AutoBinary` /
-`AutoAscii` variants. P7 PAM accepts every supported `PbmPixelFormat`
-(including the GRAYSCALE-as-PAM case that `encode_pbm` would otherwise
-route to P5).
+`Pnm4` / `Pnm5` / `Pnm6` / `Pam7` / `Pfm`) plus the convenience
+`AutoBinary` / `AutoAscii` variants. P7 PAM accepts every supported
+`PbmPixelFormat` (including the GRAYSCALE-as-PAM case that `encode_pbm`
+would otherwise route to P5).
+
+## Portable FloatMap (`Pf` / `PF`)
+
+The Portable FloatMap is the floating-point member of the family: a
+strict three-line ASCII header followed by raw IEEE-754 binary32 samples
+(one per pixel for `Pf` grayscale, three interleaved R/G/B for `PF`
+colour). Reference: `docs/image/netpbm/pfm-portable-floatmap.md` (Debevec
+PFM reference).
+
+- **Header** is exactly three LF-terminated lines — magic, `width
+  height`, and a scale line — with **no comments** and **no CRLF**. Any
+  `#`, carriage return, or missing LF is rejected.
+- **Byte order** is carried by the *sign* of the scale line: negative ⇒
+  little-endian, positive ⇒ big-endian. Its *absolute value* is an
+  application-defined scale factor, preserved as metadata (not applied to
+  the pixels).
+- **Row order on disk is bottom-to-top**; the decoder flips rows so the
+  in-memory plane is the conventional top-to-bottom layout. In memory the
+  float samples are always little-endian (`GrayF32` = 4 B/px, `RgbF32` =
+  12 B/px).
+
+Dedicated entry points [`decode_pfm`] / [`encode_pfm`] expose the byte
+order and scale explicitly; [`decode_pbm`] / [`encode_pbm`] also handle
+`Pf` / `PF` automatically (encoding defaults to little-endian with a unit
+scale). The two float formats have no `oxideav_core::PixelFormat`
+counterpart, so the framework codec/container path advertises no pixel
+format for them — they are reachable through the standalone API and the
+crate-local `PbmImage` model.
 
 ## PAM tuple-type handling
 

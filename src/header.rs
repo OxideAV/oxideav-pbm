@@ -39,6 +39,12 @@ pub enum Magic {
     P6BinaryPixmap,
     /// `P7` — binary PAM with multi-line header.
     P7Pam,
+    /// `Pf` — single-channel (grayscale) Portable FloatMap: raw
+    /// IEEE-754 binary32 samples with a three-line header.
+    PfPfmGrayFloat,
+    /// `PF` — 3-channel (RGB) Portable FloatMap: raw IEEE-754 binary32
+    /// samples with a three-line header.
+    PFPfmRgbFloat,
 }
 
 impl Magic {
@@ -54,8 +60,20 @@ impl Magic {
             b'5' => Self::P5BinaryGraymap,
             b'6' => Self::P6BinaryPixmap,
             b'7' => Self::P7Pam,
+            // Portable FloatMap: capital `F` = 3-channel RGB, lowercase
+            // `f` = single-channel grayscale (case-sensitive).
+            b'F' => Self::PFPfmRgbFloat,
+            b'f' => Self::PfPfmGrayFloat,
             _ => return None,
         })
+    }
+
+    /// `true` for the two Portable FloatMap magics (`Pf` / `PF`), whose
+    /// header shape and body encoding differ entirely from PNM/PAM (a
+    /// fixed three-line comment-free header followed by raw IEEE-754
+    /// binary32 samples in bottom-to-top order).
+    pub fn is_pfm(self) -> bool {
+        matches!(self, Self::PfPfmGrayFloat | Self::PFPfmRgbFloat)
     }
 
     /// `true` for P1/P2/P3 — sample data is whitespace-separated decimal
@@ -74,6 +92,8 @@ impl Magic {
             Self::P1AsciiBitmap | Self::P4BinaryBitmap => 1,
             Self::P2AsciiGraymap | Self::P5BinaryGraymap => 1,
             Self::P3AsciiPixmap | Self::P6BinaryPixmap => 3,
+            Self::PfPfmGrayFloat => 1,
+            Self::PFPfmRgbFloat => 3,
             Self::P7Pam => return None,
         })
     }
@@ -157,7 +177,24 @@ impl Tupltype {
     }
 }
 
-/// Parsed header — common across all seven magic numbers.
+/// Portable FloatMap header metadata, populated only for the `Pf` / `PF`
+/// magics. The third PFM header line carries both the byte order (via its
+/// sign) and an application-defined scale factor (its absolute value).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PfmInfo {
+    /// `true` when the on-disk float samples are little-endian (the
+    /// header's scale line was negative); `false` for big-endian (a
+    /// positive scale line).
+    pub little_endian: bool,
+    /// The absolute value of the scale line — an application-defined
+    /// scale factor the producer associated with the samples. The
+    /// decoder preserves the raw sample values unchanged and reports this
+    /// magnitude as metadata; it does not apply it to the pixels.
+    pub scale: f32,
+}
+
+/// Parsed header — common across all seven Netpbm magic numbers plus the
+/// two Portable FloatMap magics.
 #[derive(Debug, Clone)]
 pub struct Header {
     pub magic: Magic,
@@ -165,15 +202,20 @@ pub struct Header {
     pub height: u32,
     /// Maximum sample value. `1` for P1/P4 (implicit), 1..=65535 for the
     /// rest. Values > 255 force 16-bit big-endian binary samples on P5/P6/P7.
+    /// Unused (`0`) for the Portable FloatMap magics, whose samples are
+    /// IEEE-754 binary32 with no integer `MAXVAL`.
     pub maxval: u32,
-    /// Channel count: derived from `magic` for P1-P6 and read from
-    /// `DEPTH` for P7.
+    /// Channel count: derived from `magic` for P1-P6 (and `Pf` / `PF`)
+    /// and read from `DEPTH` for P7.
     pub depth: u32,
-    /// Only populated for P7. `None` for P1-P6.
+    /// Only populated for P7. `None` for P1-P6 and the PFM magics.
     pub tupltype: Option<Tupltype>,
     /// Byte offset where the pixel data begins (0-based, into the input
     /// slice the header was parsed from).
     pub data_offset: usize,
+    /// Byte order + scale metadata for the Portable FloatMap magics;
+    /// `None` for every PNM/PAM magic.
+    pub pfm: Option<PfmInfo>,
 }
 
 impl Header {
@@ -184,6 +226,8 @@ impl Header {
     pub fn bits_per_sample(&self) -> u32 {
         match self.magic {
             Magic::P1AsciiBitmap | Magic::P4BinaryBitmap => 1,
+            // IEEE-754 binary32 samples.
+            Magic::PfPfmGrayFloat | Magic::PFPfmRgbFloat => 32,
             _ => {
                 if self.maxval > 255 {
                     16
@@ -203,6 +247,9 @@ pub fn parse_header(input: &[u8]) -> Result<Header> {
         .ok_or_else(|| Error::invalid("Netpbm: missing or unrecognised P<N> magic"))?;
     if magic == Magic::P7Pam {
         return parse_pam_header(input);
+    }
+    if magic.is_pfm() {
+        return parse_pfm_header(input, magic);
     }
     parse_pnm_header(input, magic)
 }
@@ -251,6 +298,7 @@ fn parse_pnm_header(input: &[u8], magic: Magic) -> Result<Header> {
         depth: magic.channels().expect("P1-P6 have implicit channels") as u32,
         tupltype: None,
         data_offset,
+        pfm: None,
     })
 }
 
@@ -336,7 +384,116 @@ fn parse_pam_header(input: &[u8]) -> Result<Header> {
         depth,
         tupltype,
         data_offset: cursor,
+        pfm: None,
     })
+}
+
+/// Parse a Portable FloatMap header: exactly three LF-terminated lines
+/// (magic, "width height", scale) with **no comments** and **no CRLF**.
+/// Per the Debevec PFM reference, each header line ends with a single
+/// `0x0a` (LF), not the DOS `0x0d 0x0a` pair, and the format defines no
+/// `#` comment syntax (unlike the PNM family).
+fn parse_pfm_header(input: &[u8], magic: Magic) -> Result<Header> {
+    let mut cursor = 0usize;
+
+    // Line 1 — the magic / type token. Must be exactly `PF` (3-channel
+    // RGB) or `Pf` (single-channel grayscale).
+    let line1 = read_pfm_line(input, &mut cursor)?;
+    let channels: u32 = match trim_ascii(line1) {
+        b"PF" => 3,
+        b"Pf" => 1,
+        _ => return Err(Error::invalid("PFM: header line 1 is not 'PF' or 'Pf'")),
+    };
+
+    // Line 2 — `width height` as decimal ASCII integers.
+    let line2 = read_pfm_line(input, &mut cursor)?;
+    let (width, height) = parse_two_uints(line2)?;
+    if width == 0 || height == 0 {
+        return Err(Error::invalid("PFM: zero width or height"));
+    }
+
+    // Line 3 — the scale / endianness line: sign selects byte order
+    // (negative = little-endian, positive = big-endian) and the absolute
+    // value is the scale factor.
+    let line3 = read_pfm_line(input, &mut cursor)?;
+    let scale = parse_scale(line3)?;
+
+    Ok(Header {
+        magic,
+        width,
+        height,
+        maxval: 0,
+        depth: channels,
+        tupltype: None,
+        data_offset: cursor,
+        pfm: Some(PfmInfo {
+            little_endian: scale.is_sign_negative(),
+            scale: scale.abs(),
+        }),
+    })
+}
+
+/// Read one Portable FloatMap header line: bytes up to (and consuming)
+/// the next `0x0a`. Rejects an embedded `0x0d` (CRLF / stray CR), a `#`
+/// (PFM defines no comments), and a missing LF terminator.
+fn read_pfm_line<'a>(input: &'a [u8], cursor: &mut usize) -> Result<&'a [u8]> {
+    if *cursor >= input.len() {
+        return Err(Error::invalid("PFM: header truncated"));
+    }
+    let start = *cursor;
+    while *cursor < input.len() {
+        match input[*cursor] {
+            b'\n' => {
+                let line = &input[start..*cursor];
+                *cursor += 1; // step past the LF
+                return Ok(line);
+            }
+            b'\r' => {
+                return Err(Error::invalid(
+                    "PFM: carriage return in header (CRLF line endings are not allowed)",
+                ))
+            }
+            b'#' => {
+                return Err(Error::invalid(
+                    "PFM: '#' in header (comments are not allowed)",
+                ))
+            }
+            _ => *cursor += 1,
+        }
+    }
+    Err(Error::invalid("PFM: header line missing LF terminator"))
+}
+
+/// Parse exactly two whitespace-separated decimal integers from a PFM
+/// dimension line.
+fn parse_two_uints(line: &[u8]) -> Result<(u32, u32)> {
+    let s =
+        std::str::from_utf8(line).map_err(|_| Error::invalid("PFM: non-UTF-8 dimension line"))?;
+    let mut it = s.split_ascii_whitespace();
+    let w = it
+        .next()
+        .ok_or_else(|| Error::invalid("PFM: missing width on dimension line"))?;
+    let h = it
+        .next()
+        .ok_or_else(|| Error::invalid("PFM: missing height on dimension line"))?;
+    if it.next().is_some() {
+        return Err(Error::invalid("PFM: extra tokens on dimension line"));
+    }
+    Ok((parse_uint(w)?, parse_uint(h)?))
+}
+
+/// Parse the PFM scale / endianness line as an IEEE-754 binary32 value.
+/// A `NaN` is rejected because its sign cannot disambiguate byte order.
+fn parse_scale(line: &[u8]) -> Result<f32> {
+    let s = std::str::from_utf8(line).map_err(|_| Error::invalid("PFM: non-UTF-8 scale line"))?;
+    let v: f32 = s
+        .trim()
+        .parse()
+        .map_err(|e| Error::invalid(format!("PFM: bad scale '{}': {e}", s.trim())))?;
+    if v.is_nan() {
+        return Err(Error::invalid("PFM: scale is NaN (ambiguous byte order)"));
+    }
+    Ok(v)
 }
 
 // ---------------------------------------------------------------------------
@@ -556,6 +713,58 @@ mod tests {
         let buf = b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 1\nMAXVAL 255\nTUPLTYPE\nENDHDR\n\x00";
         let h = parse_header(buf);
         assert!(h.is_err(), "expected error, got {h:?}");
+    }
+
+    #[test]
+    fn parses_pfm_rgb_little_endian_header() {
+        let buf = b"PF\n4 3\n-1.0\n\x00\x00\x00\x00";
+        let h = parse_header(buf).unwrap();
+        assert_eq!(h.magic, Magic::PFPfmRgbFloat);
+        assert_eq!(h.width, 4);
+        assert_eq!(h.height, 3);
+        assert_eq!(h.depth, 3);
+        let info = h.pfm.expect("pfm metadata");
+        assert!(info.little_endian);
+        assert_eq!(info.scale, 1.0);
+        // Header is "PF\n4 3\n-1.0\n" = 12 bytes; the lone payload byte
+        // follows.
+        assert_eq!(h.data_offset, 12);
+    }
+
+    #[test]
+    fn parses_pfm_gray_big_endian_header_with_scale() {
+        let buf = b"Pf\n2 2\n2.5\nbody";
+        let h = parse_header(buf).unwrap();
+        assert_eq!(h.magic, Magic::PfPfmGrayFloat);
+        assert_eq!(h.depth, 1);
+        let info = h.pfm.expect("pfm metadata");
+        assert!(!info.little_endian);
+        assert_eq!(info.scale, 2.5);
+        assert_eq!(&buf[h.data_offset..], b"body");
+    }
+
+    #[test]
+    fn pfm_rejects_crlf_in_header() {
+        let buf = b"PF\r\n4 3\r\n-1.0\r\n";
+        assert!(parse_header(buf).is_err());
+    }
+
+    #[test]
+    fn pfm_rejects_comment_in_header() {
+        let buf = b"PF\n# a comment\n4 3\n-1.0\n";
+        assert!(parse_header(buf).is_err());
+    }
+
+    #[test]
+    fn pfm_rejects_nan_scale() {
+        let buf = b"Pf\n2 2\nNaN\n";
+        assert!(parse_header(buf).is_err());
+    }
+
+    #[test]
+    fn pfm_rejects_zero_dimension() {
+        let buf = b"Pf\n0 2\n-1.0\n";
+        assert!(parse_header(buf).is_err());
     }
 
     #[test]

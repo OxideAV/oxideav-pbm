@@ -29,23 +29,27 @@ pub fn register(reg: &mut ContainerRegistry) {
     reg.register_extension("ppm", "pbm");
     reg.register_extension("pnm", "pbm");
     reg.register_extension("pam", "pbm");
+    // Portable FloatMap (`Pf` / `PF`) — the floating-point member of the
+    // family, same single-image-per-file shape.
+    reg.register_extension("pfm", "pbm");
     reg.register_probe("pbm", probe);
 }
 
 fn probe(data: &ProbeData) -> ProbeScore {
     if data.buf.len() >= 2 && data.buf[0] == b'P' {
-        // Magic byte 1 must be one of '1'..'7' AND byte 2 must be ASCII
-        // whitespace — that pair is rare enough in random data to claim
-        // a max-score probe (the man pages mandate the whitespace).
+        // Magic byte 1 must be one of '1'..'7' (PNM/PAM) or 'f'/'F'
+        // (Portable FloatMap) AND byte 2 must be ASCII whitespace — that
+        // pair is rare enough in random data to claim a max-score probe
+        // (the format specs mandate the whitespace / LF separator).
         let m = data.buf[1];
         let ws_ok = data.buf.len() < 3 || matches!(data.buf[2], b'\n' | b' ' | b'\t' | b'\r');
-        if matches!(m, b'1'..=b'7') && ws_ok {
+        if matches!(m, b'1'..=b'7' | b'f' | b'F') && ws_ok {
             return MAX_PROBE_SCORE;
         }
     }
     if matches!(
         data.ext,
-        Some("pbm") | Some("pgm") | Some("ppm") | Some("pnm") | Some("pam")
+        Some("pbm") | Some("pgm") | Some("ppm") | Some("pnm") | Some("pam") | Some("pfm")
     ) {
         oxideav_core::PROBE_SCORE_EXTENSION
     } else {
@@ -61,11 +65,14 @@ pub fn open_demuxer(
     let mut buf = Vec::new();
     input.read_to_end(&mut buf)?;
     let header = parse_header(&buf)?;
-    let pixel_format = pick_advertised_format(&header);
     let mut params = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
     params.width = Some(header.width);
     params.height = Some(header.height);
-    params.pixel_format = Some(pixel_format);
+    // `None` for Portable FloatMap: its 32-bit float samples have no
+    // representation in the core `PixelFormat` catalogue. The decoder is
+    // self-describing from the byte stream, so the advertised format is
+    // advisory and may be left unset.
+    params.pixel_format = pick_advertised_format(&header);
     let stream = StreamInfo {
         index: 0,
         params,
@@ -79,8 +86,10 @@ pub fn open_demuxer(
     }))
 }
 
-fn pick_advertised_format(h: &crate::header::Header) -> PixelFormat {
-    match h.magic {
+fn pick_advertised_format(h: &crate::header::Header) -> Option<PixelFormat> {
+    Some(match h.magic {
+        // Portable FloatMap float samples are outside the core catalogue.
+        Magic::PfPfmGrayFloat | Magic::PFPfmRgbFloat => return None,
         Magic::P1AsciiBitmap | Magic::P4BinaryBitmap => PixelFormat::MonoBlack,
         Magic::P2AsciiGraymap | Magic::P5BinaryGraymap => {
             if h.maxval > 255 {
@@ -118,7 +127,7 @@ fn pick_advertised_format(h: &crate::header::Header) -> PixelFormat {
             (None, 4, true) | (Some(Tupltype::Custom(_)), 4, true) => PixelFormat::Rgba64Le,
             _ => PixelFormat::Rgba,
         },
-    }
+    })
 }
 
 struct PbmDemuxer {

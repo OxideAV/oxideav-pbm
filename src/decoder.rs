@@ -101,6 +101,11 @@ fn image_to_video_frame(image: PbmImage) -> VideoFrame {
 pub fn decode_pbm(input: &[u8]) -> Result<(PbmImage, PbmPixelFormat)> {
     let header = parse_header(input)?;
     let body = &input[header.data_offset..];
+    // Portable FloatMap has a wholly different (float, bottom-to-top,
+    // endianness-tagged) body — hand it to the dedicated decoder.
+    if header.magic.is_pfm() {
+        return crate::pfm::decode_pfm_image(&header, body);
+    }
     let samples = if header.magic.is_ascii() {
         decode_ascii(&header, body)?
     } else {
@@ -147,6 +152,8 @@ fn samples_to_plane(h: &Header, s: &DecodedSamples) -> Result<(PbmPlane, PbmPixe
         PbmPixelFormat::Rgba | PbmPixelFormat::Bgra => 4,
         PbmPixelFormat::Rgb48Le => 6,
         PbmPixelFormat::Rgba64Le => 8,
+        PbmPixelFormat::GrayF32 => 4,
+        PbmPixelFormat::RgbF32 => 12,
     };
     let stride_check = if matches!(format, PbmPixelFormat::MonoBlack) {
         w.div_ceil(8)
@@ -265,6 +272,12 @@ fn samples_to_plane(h: &Header, s: &DecodedSamples) -> Result<(PbmPlane, PbmPixe
         PbmPixelFormat::Bgra => Err(Error::unsupported(
             "Netpbm: BGRA decode not produced by any source format".to_string(),
         )),
+        // The float maps are decoded by `crate::pfm::decode_pfm_image`,
+        // which `decode_pbm` dispatches to before reaching this integer
+        // sample path — they never arrive here.
+        PbmPixelFormat::GrayF32 | PbmPixelFormat::RgbF32 => Err(Error::invalid(
+            "Netpbm: float-map pixel format reached the integer sample path",
+        )),
     }
 }
 
@@ -337,6 +350,8 @@ fn fill_rgba_u8(dst: &mut [u8], src: &[u16], maxval: u32, layout: RgbaLayout) {
 /// drive the choice when present; otherwise we go by `(depth, bits)`.
 fn pick_pixel_format(h: &Header) -> Result<PbmPixelFormat> {
     Ok(match h.magic {
+        Magic::PfPfmGrayFloat => PbmPixelFormat::GrayF32,
+        Magic::PFPfmRgbFloat => PbmPixelFormat::RgbF32,
         Magic::P1AsciiBitmap | Magic::P4BinaryBitmap => PbmPixelFormat::MonoBlack,
         Magic::P2AsciiGraymap | Magic::P5BinaryGraymap => {
             if h.maxval > 255 {
