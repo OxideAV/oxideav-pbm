@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-pbm/compare/v0.0.3...v0.0.4) - 2026-05-29
+
+### Other
+
+- ASCII (P1/P2/P3) hot-path: direct digit writers + u32 accumulator
+- Portable FloatMap (Pf/PF) decode + encode
+- accept user-defined PAM TUPLTYPE names verbatim
+- criterion harness for decode / encode / roundtrip hot paths
+- cargo-fuzz harness + pre-allocation OOM hardening
+- explicit ASCII-vs-binary format selector + parser hardening
+
 ### Changed
 
 - Round 189: ASCII (P1 / P2 / P3) encoder and decoder hot paths
