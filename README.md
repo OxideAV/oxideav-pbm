@@ -103,7 +103,7 @@ routes the pixels through the same depth-based fallback used when
 
 ## Fuzzing
 
-A `fuzz/` cargo-fuzz workspace exercises three independent entry
+A `fuzz/` cargo-fuzz workspace exercises four independent entry
 points:
 
 * `decode` — full pipeline (`parse_header` → ASCII/binary body decoder
@@ -112,13 +112,20 @@ points:
   key/value block).
 * `encode_roundtrip` — synthetic `PbmImage` → every `PbmEncodeFormat`
   × `PbmPixelFormat` pair, including the `Unsupported` rejection paths.
+* `pfm` — Portable FloatMap decoder in isolation (`decode_pfm`):
+  the strict three-line header (no comments, no CRLF, single-LF
+  terminator, sign-of-scale endianness selector), the raster overflow
+  guards on `width * height * channels * 4`, the body-truncation
+  check, and the big-endian byte-swap kernel. The PFM parser is
+  disjoint from the PNM/PAM tokenizer the `decode` / `header`
+  harnesses cover, so the round-199 addition closes a coverage gap.
 
 The harness uncovered one pre-allocation OOM during round 171 (a
 header claiming `width * height` in the billions triggered an
 unchecked `vec![0u16; total_samples]` before the body-length check) —
 both ASCII and binary decoders now validate dimensions against the
 available body length before allocating. A daily CI run
-(`.github/workflows/fuzz.yml`, 30 min budget split across the three
+(`.github/workflows/fuzz.yml`, 30 min budget split across the four
 targets) keeps the contract enforced.
 
 ## Benchmarks
@@ -135,16 +142,23 @@ cargo bench -p oxideav-pbm --bench roundtrip
 ```
 
 The matrix covers every binary magic (P4/P5/P6/P7) at 8 and 16-bit
-plus the three ASCII magics (P1/P2/P3) so future optimisation rounds
-can A/B-compare SIMD byte-swap (P5/P6 16-bit), branch-free bit packers
-(P4), or lookup-table ASCII writers (P2/P3) against the r176 baseline.
-Indicative apple-silicon numbers on the binary path: ~1.7 GiB/s P6
-8-bit decode, ~6.9 GiB/s P7 16-bit RGBA decode, ~26 GiB/s P7
-8-bit GRAYSCALE_ALPHA encode. Round 189 rewrote the ASCII hot path
-(direct digit writers + u32 accumulator, no `to_string`/`parse`
-round-trips): 320×240 P1 encode 7 MiB/s → ~140 MiB/s, P2 encode
-60 MiB/s → ~320 MiB/s, P3 encode 58 MiB/s → ~295 MiB/s, P2/P3 decode
-both up ≈30-40 %.
+plus the three ASCII magics (P1/P2/P3) and — as of round 199 — the
+two Portable FloatMap magics (`Pf` / `PF`) in both byte orders, so
+future optimisation rounds can A/B-compare SIMD byte-swap (P5/P6
+16-bit, `Pf`/`PF` BE), branch-free bit packers (P4), or lookup-table
+ASCII writers (P2/P3) against a stable baseline. Indicative
+apple-silicon numbers on the binary path: ~1.7 GiB/s P6 8-bit
+decode, ~6.9 GiB/s P7 16-bit RGBA decode, ~26 GiB/s P7 8-bit
+GRAYSCALE_ALPHA encode. Round 199 PFM baselines at 256×256:
+`Pf` LE decode ~32 GiB/s, `Pf` BE decode ~30 GiB/s, `PF` LE decode
+~27 GiB/s, `PF` BE decode ~21 GiB/s; encode `Pf` LE ~42 GiB/s vs
+`Pf` BE ~1.86 GiB/s, `PF` LE ~45 GiB/s vs `PF` BE ~1.86 GiB/s —
+the BE encode is bottlenecked by the per-sample 4-byte swap loop
+and is the obvious target for a future SIMD pass. Round 189 rewrote
+the ASCII hot path (direct digit writers + u32 accumulator, no
+`to_string`/`parse` round-trips): 320×240 P1 encode 7 MiB/s →
+~140 MiB/s, P2 encode 60 MiB/s → ~320 MiB/s, P3 encode 58 MiB/s →
+~295 MiB/s, P2/P3 decode both up ≈30-40 %.
 
 ## Registration
 

@@ -39,6 +39,14 @@
 //!     ASCII `Gray8` decode (number parser + whitespace skipper).
 //!   - **decode_p3_rgb24_320x240**: 320×240 plain-ASCII PPM — three
 //!     numbers per pixel, the densest ASCII path.
+//!   - **decode_pf_gray_le_256x256** / **decode_pf_gray_be_256x256**:
+//!     256×256 single-channel Portable FloatMap. The LE variant is the
+//!     fast row-flip path (no byte swap); the BE variant exercises the
+//!     per-sample 4-byte swap kernel.
+//!   - **decode_pf_rgb_le_256x256** / **decode_pf_rgb_be_256x256**:
+//!     256×256 3-channel Portable FloatMap (12 B/px). The widest PFM
+//!     paths; BE drives the byte-swap kernel at 3× the sample count
+//!     of `Pf` BE.
 //!
 //! Run with:
 //!     cargo bench -p oxideav-pbm --bench decode
@@ -46,8 +54,8 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use oxideav_pbm::{
-    decode_pbm, encode_pbm, encode_pbm_ascii, encode_pbm_with_format, PbmEncodeFormat, PbmImage,
-    PbmPixelFormat, PbmPlane,
+    decode_pbm, encode_pbm, encode_pbm_ascii, encode_pbm_with_format, encode_pfm, PbmEncodeFormat,
+    PbmImage, PbmPixelFormat, PbmPlane,
 };
 
 /// xorshift32 — keeps the bench input from being trivially compressible
@@ -198,6 +206,43 @@ fn build_rgba64(width: u32, height: u32) -> PbmImage {
     }
 }
 
+/// Build a finite-valued float image (`Pf` 1-channel or `PF` 3-channel)
+/// so the PFM byte-swap kernel sees representative samples rather than
+/// the NaN/inf grab-bag that random bytes would produce.
+fn build_float_image(width: u32, height: u32, channels: usize, seed: u32) -> PbmImage {
+    let w = width as usize;
+    let h = height as usize;
+    let stride = w * channels * 4;
+    let mut data = vec![0u8; stride * h];
+    let mut state = seed;
+    for y in 0..h {
+        for x in 0..w {
+            for c in 0..channels {
+                // Drive each sample from xorshift but scale into a tame
+                // finite range so encode/decode does the same arithmetic
+                // a real HDR pipeline would.
+                let raw =
+                    (xorshift_byte(&mut state) as u32) << 8 | xorshift_byte(&mut state) as u32;
+                let v = (raw as f32) / 65535.0 * 100.0 - 50.0;
+                let off = y * stride + (x * channels + c) * 4;
+                data[off..off + 4].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
+    let format = if channels == 3 {
+        PbmPixelFormat::RgbF32
+    } else {
+        PbmPixelFormat::GrayF32
+    };
+    PbmImage {
+        width,
+        height,
+        pixel_format: format,
+        planes: vec![PbmPlane { stride, data }],
+        pts: None,
+    }
+}
+
 fn bench_decode_p4_mono_640x480(c: &mut Criterion) {
     let image = build_mono(640, 480);
     let bytes = encode_pbm(&image).expect("encode_pbm P4");
@@ -311,6 +356,58 @@ fn bench_decode_p3_rgb24_320x240(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_decode_pf_gray_le_256x256(c: &mut Criterion) {
+    // `Pf` little-endian — the fast path, just a row-flip and per-row
+    // `copy_from_slice` with no byte swap.
+    let image = build_float_image(256, 256, 1, 0xcafe_b0ba);
+    let bytes = encode_pfm(&image, true, 1.0).expect("encode_pfm Pf LE");
+    let mut g = c.benchmark_group("decode_pf_gray_le_256x256");
+    g.throughput(Throughput::Bytes((256 * 256 * 4) as u64));
+    g.bench_function(BenchmarkId::from_parameter("pf/le/256x256"), |b| {
+        b.iter(|| decode_pbm(criterion::black_box(&bytes)).expect("decode_pbm"));
+    });
+    g.finish();
+}
+
+fn bench_decode_pf_gray_be_256x256(c: &mut Criterion) {
+    // `Pf` big-endian — exercises the per-sample 4-byte swap kernel
+    // that the LE path skips.
+    let image = build_float_image(256, 256, 1, 0xdead_beef);
+    let bytes = encode_pfm(&image, false, 1.0).expect("encode_pfm Pf BE");
+    let mut g = c.benchmark_group("decode_pf_gray_be_256x256");
+    g.throughput(Throughput::Bytes((256 * 256 * 4) as u64));
+    g.bench_function(BenchmarkId::from_parameter("pf/be/256x256"), |b| {
+        b.iter(|| decode_pbm(criterion::black_box(&bytes)).expect("decode_pbm"));
+    });
+    g.finish();
+}
+
+fn bench_decode_pf_rgb_le_256x256(c: &mut Criterion) {
+    // `PF` little-endian — three floats per pixel; widest LE path
+    // through the row-flip.
+    let image = build_float_image(256, 256, 3, 0xfeed_face);
+    let bytes = encode_pfm(&image, true, 1.0).expect("encode_pfm PF LE");
+    let mut g = c.benchmark_group("decode_pf_rgb_le_256x256");
+    g.throughput(Throughput::Bytes((256 * 256 * 12) as u64));
+    g.bench_function(BenchmarkId::from_parameter("pf/rgb/le/256x256"), |b| {
+        b.iter(|| decode_pbm(criterion::black_box(&bytes)).expect("decode_pbm"));
+    });
+    g.finish();
+}
+
+fn bench_decode_pf_rgb_be_256x256(c: &mut Criterion) {
+    // `PF` big-endian — widest byte-swap path (3× more samples per
+    // pixel than `Pf` BE).
+    let image = build_float_image(256, 256, 3, 0xc0de_f00d);
+    let bytes = encode_pfm(&image, false, 1.0).expect("encode_pfm PF BE");
+    let mut g = c.benchmark_group("decode_pf_rgb_be_256x256");
+    g.throughput(Throughput::Bytes((256 * 256 * 12) as u64));
+    g.bench_function(BenchmarkId::from_parameter("pf/rgb/be/256x256"), |b| {
+        b.iter(|| decode_pbm(criterion::black_box(&bytes)).expect("decode_pbm"));
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_decode_p4_mono_640x480,
@@ -323,5 +420,9 @@ criterion_group!(
     bench_decode_p1_mono_320x240,
     bench_decode_p2_gray8_320x240,
     bench_decode_p3_rgb24_320x240,
+    bench_decode_pf_gray_le_256x256,
+    bench_decode_pf_gray_be_256x256,
+    bench_decode_pf_rgb_le_256x256,
+    bench_decode_pf_rgb_be_256x256,
 );
 criterion_main!(benches);

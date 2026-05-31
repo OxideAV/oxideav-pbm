@@ -19,13 +19,22 @@
 //!   - **roundtrip_p7_rgba_320x240**: 320×240 PAM `RGB_ALPHA` 8-bit.
 //!   - **roundtrip_p7_rgba64_256x256**: 256×256 PAM `RGB_ALPHA`
 //!     16-bit — widest pixel format.
+//!   - **roundtrip_pf_gray_le_256x256** /
+//!     **roundtrip_pf_gray_be_256x256**: 256×256 single-channel
+//!     Portable FloatMap, both byte orders. BE drives the swap kernel
+//!     on both encode and decode sides.
+//!   - **roundtrip_pf_rgb_le_256x256** /
+//!     **roundtrip_pf_rgb_be_256x256**: 256×256 3-channel Portable
+//!     FloatMap (12 B/px) — widest PFM roundtrip.
 //!
 //! Run with:
 //!     cargo bench -p oxideav-pbm --bench roundtrip
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use oxideav_pbm::{decode_pbm, encode_pbm, PbmImage, PbmPixelFormat, PbmPlane};
+use oxideav_pbm::{
+    decode_pbm, decode_pfm, encode_pbm, encode_pfm, PbmImage, PbmPixelFormat, PbmPlane,
+};
 
 fn xorshift_byte(state: &mut u32) -> u8 {
     *state ^= *state << 13;
@@ -69,6 +78,49 @@ fn build_filled(width: u32, height: u32, format: PbmPixelFormat, seed: u32) -> P
 fn rt(image: &PbmImage) {
     let bytes = encode_pbm(criterion::black_box(image)).expect("encode_pbm");
     let (_, _fmt) = decode_pbm(criterion::black_box(&bytes)).expect("decode_pbm");
+}
+
+/// Build a finite-valued float image (no NaN / inf samples) so the PFM
+/// roundtrip exercises representative HDR data rather than the NaN
+/// soup random bytes would produce.
+fn build_float_image(width: u32, height: u32, channels: usize, seed: u32) -> PbmImage {
+    let w = width as usize;
+    let h = height as usize;
+    let stride = w * channels * 4;
+    let mut data = vec![0u8; stride * h];
+    let mut state = seed;
+    for y in 0..h {
+        for x in 0..w {
+            for c in 0..channels {
+                let raw =
+                    (xorshift_byte(&mut state) as u32) << 8 | xorshift_byte(&mut state) as u32;
+                let v = (raw as f32) / 65535.0 * 100.0 - 50.0;
+                let off = y * stride + (x * channels + c) * 4;
+                data[off..off + 4].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
+    let format = if channels == 3 {
+        PbmPixelFormat::RgbF32
+    } else {
+        PbmPixelFormat::GrayF32
+    };
+    PbmImage {
+        width,
+        height,
+        pixel_format: format,
+        planes: vec![PbmPlane { stride, data }],
+        pts: None,
+    }
+}
+
+/// PFM end-to-end roundtrip exercising the chosen byte order on both
+/// sides. Drives the dedicated `encode_pfm` / `decode_pfm` entry
+/// points rather than the unified `encode_pbm` path so we can pin
+/// big-endian on the encode side (the unified path always writes LE).
+fn rt_pfm(image: &PbmImage, little_endian: bool) {
+    let bytes = encode_pfm(criterion::black_box(image), little_endian, 1.0).expect("encode_pfm");
+    let (_, _info) = decode_pfm(criterion::black_box(&bytes)).expect("decode_pfm");
 }
 
 fn bench_roundtrip_p4_mono_320x240(c: &mut Criterion) {
@@ -141,6 +193,48 @@ fn bench_roundtrip_p7_rgba64_256x256(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_roundtrip_pf_gray_le_256x256(c: &mut Criterion) {
+    let image = build_float_image(256, 256, 1, 0x1818_2929);
+    let mut g = c.benchmark_group("roundtrip_pf_gray_le_256x256");
+    g.throughput(Throughput::Bytes((256 * 256 * 4) as u64));
+    g.bench_function(BenchmarkId::from_parameter("pf/le/256x256"), |b| {
+        b.iter(|| rt_pfm(&image, true));
+    });
+    g.finish();
+}
+
+fn bench_roundtrip_pf_gray_be_256x256(c: &mut Criterion) {
+    // BE roundtrip — both encoder and decoder traverse the byte-swap
+    // kernel; a regression on either side shows up here.
+    let image = build_float_image(256, 256, 1, 0x2929_3a3a);
+    let mut g = c.benchmark_group("roundtrip_pf_gray_be_256x256");
+    g.throughput(Throughput::Bytes((256 * 256 * 4) as u64));
+    g.bench_function(BenchmarkId::from_parameter("pf/be/256x256"), |b| {
+        b.iter(|| rt_pfm(&image, false));
+    });
+    g.finish();
+}
+
+fn bench_roundtrip_pf_rgb_le_256x256(c: &mut Criterion) {
+    let image = build_float_image(256, 256, 3, 0x3a3a_4b4b);
+    let mut g = c.benchmark_group("roundtrip_pf_rgb_le_256x256");
+    g.throughput(Throughput::Bytes((256 * 256 * 12) as u64));
+    g.bench_function(BenchmarkId::from_parameter("pf/rgb/le/256x256"), |b| {
+        b.iter(|| rt_pfm(&image, true));
+    });
+    g.finish();
+}
+
+fn bench_roundtrip_pf_rgb_be_256x256(c: &mut Criterion) {
+    let image = build_float_image(256, 256, 3, 0x4b4b_5c5c);
+    let mut g = c.benchmark_group("roundtrip_pf_rgb_be_256x256");
+    g.throughput(Throughput::Bytes((256 * 256 * 12) as u64));
+    g.bench_function(BenchmarkId::from_parameter("pf/rgb/be/256x256"), |b| {
+        b.iter(|| rt_pfm(&image, false));
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_roundtrip_p4_mono_320x240,
@@ -150,5 +244,9 @@ criterion_group!(
     bench_roundtrip_p6_rgb48_256x256,
     bench_roundtrip_p7_rgba_320x240,
     bench_roundtrip_p7_rgba64_256x256,
+    bench_roundtrip_pf_gray_le_256x256,
+    bench_roundtrip_pf_gray_be_256x256,
+    bench_roundtrip_pf_rgb_le_256x256,
+    bench_roundtrip_pf_rgb_be_256x256,
 );
 criterion_main!(benches);

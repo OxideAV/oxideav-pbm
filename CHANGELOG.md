@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round 199: Portable FloatMap coverage for the fuzz + bench
+  matrices. A dedicated `pfm` cargo-fuzz target drives `decode_pfm`
+  directly so the daily 30-minute fuzz budget exercises the strict
+  three-line header (no comments, no CRLF, single-LF terminator,
+  sign-of-scale endianness selector), the raster-size overflow guards,
+  the body-truncation check, and the big-endian byte-swap kernel —
+  none of which is reachable through the existing `decode` / `header`
+  harnesses (PFM is disjoint from the PNM/PAM tokenizer). Twelve new
+  Criterion benches (four each across `benches/{decode,encode,
+  roundtrip}.rs`) cover `Pf` / `PF` × LE / BE at 256×256 with
+  finite-valued synthetic float input (no NaN / inf), giving a stable
+  baseline for a future SIMD byte-swap pass against the current
+  per-sample loop. Indicative apple-silicon numbers at 256×256:
+  decode `Pf` LE ~32 GiB/s, `Pf` BE ~30 GiB/s, `PF` LE ~27 GiB/s,
+  `PF` BE ~21 GiB/s; encode `Pf` / `PF` LE ~42-45 GiB/s vs BE
+  ~1.86 GiB/s (the BE encode is the clear bottleneck, dominated by
+  the scalar 4-byte swap).
+
 ## [0.0.4](https://github.com/OxideAV/oxideav-pbm/compare/v0.0.3...v0.0.4) - 2026-05-29
 
 ### Other

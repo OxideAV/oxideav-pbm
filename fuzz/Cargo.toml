@@ -83,3 +83,16 @@ name = "encode_roundtrip"
 path = "fuzz_targets/encode_roundtrip.rs"
 test = false
 doc = false
+
+# Portable FloatMap (`Pf` / `PF`) decode — drives `decode_pfm` directly
+# on arbitrary bytes. The PFM header is a separate strict three-line
+# state machine (no comments, no CRLF, single-LF terminator, sign-of-
+# scale-line endianness selector) and the body is a raw IEEE-754
+# float32 stream with a BE↔LE byte-swap kernel and bottom-to-top row
+# flip — none of which is shared with the PNM/PAM tokenizer the
+# `decode` and `header` harnesses already cover.
+[[bin]]
+name = "pfm"
+path = "fuzz_targets/pfm.rs"
+test = false
+doc = false
