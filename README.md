@@ -149,12 +149,19 @@ future optimisation rounds can A/B-compare SIMD byte-swap (P5/P6
 ASCII writers (P2/P3) against a stable baseline. Indicative
 apple-silicon numbers on the binary path: ~1.7 GiB/s P6 8-bit
 decode, ~6.9 GiB/s P7 16-bit RGBA decode, ~26 GiB/s P7 8-bit
-GRAYSCALE_ALPHA encode. Round 199 PFM baselines at 256×256:
-`Pf` LE decode ~32 GiB/s, `Pf` BE decode ~30 GiB/s, `PF` LE decode
-~27 GiB/s, `PF` BE decode ~21 GiB/s; encode `Pf` LE ~42 GiB/s vs
-`Pf` BE ~1.86 GiB/s, `PF` LE ~45 GiB/s vs `PF` BE ~1.86 GiB/s —
-the BE encode is bottlenecked by the per-sample 4-byte swap loop
-and is the obvious target for a future SIMD pass. Round 189 rewrote
+GRAYSCALE_ALPHA encode. Round 205 closed the PFM big-endian
+byte-swap bottleneck flagged in round 199: the per-sample
+`out.push(s[3]); out.push(s[2]); out.push(s[1]); out.push(s[0])`
+loop is now a row-level `swap_bytes_u32_row` helper that walks
+`chunks_exact(4)` over a pre-resized `&mut [u8]` destination, which
+LLVM lowers to vector `swap_bytes` (`REV32.16B` on aarch64,
+`pshufb` / `vpshufb` on x86). The PFM baselines at 256×256 are now
+`Pf` LE decode ~32 GiB/s, `Pf` BE decode ~31 GiB/s, `PF` LE decode
+~27 GiB/s, `PF` BE decode ~28 GiB/s; encode `Pf` LE ~43 GiB/s,
+`Pf` BE ~28 GiB/s (was ~1.86 GiB/s — **≈15× faster**), `PF` LE
+~45 GiB/s, `PF` BE ~29 GiB/s (was ~1.86 GiB/s — **≈15.8× faster**).
+Both decoders also funnel through the same helper, and the swap
+itself is covered by two new unit tests. Round 189 rewrote
 the ASCII hot path (direct digit writers + u32 accumulator, no
 `to_string`/`parse` round-trips): 320×240 P1 encode 7 MiB/s →
 ~140 MiB/s, P2 encode 60 MiB/s → ~320 MiB/s, P3 encode 58 MiB/s →

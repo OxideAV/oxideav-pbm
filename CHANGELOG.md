@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Round 205: Portable FloatMap big-endian byte-swap hot path. The per-sample
+  4-byte swap that round 199's PFM benches flagged as the obvious SIMD
+  target (encode `Pf` BE ~1.86 GiB/s vs LE ~42 GiB/s, `PF` BE ~1.86 GiB/s
+  vs LE ~45 GiB/s) is now routed through a row-level `swap_bytes_u32_row`
+  helper. The inner loop walks `chunks_exact(4)` over a pre-resized
+  `&mut [u8]` destination instead of pushing individual bytes onto a
+  `Vec`, so the compiler can lower it to a vector `swap_bytes` lane
+  (`REV32.16B` on aarch64, `pshufb` / `vpshufb` on x86) without any
+  hand-rolled intrinsics. Same helper is shared by the decode BE path
+  for symmetry. Measured on apple-silicon at 256×256:
+  - encode `Pf` BE 1.86 GiB/s → ~27.8 GiB/s (≈15× faster).
+  - encode `PF` BE 1.83 GiB/s → ~28.9 GiB/s (≈15.8× faster).
+  - decode `Pf` BE 30.5 GiB/s → ~31.2 GiB/s.
+  - decode `PF` BE 24.6 GiB/s → ~28.3 GiB/s (≈+15 %).
+  LE paths (no swap) are unchanged. Adds two unit tests on the helper
+  covering the swap kernel and self-inverse property; the existing PFM
+  round-trip suite already exercises the row layout end-to-end.
+
 ### Added
 
 - Round 199: Portable FloatMap coverage for the fuzz + bench

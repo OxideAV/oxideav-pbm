@@ -97,7 +97,9 @@ pub(crate) fn decode_pfm_image(h: &Header, body: &[u8]) -> Result<(PbmImage, Pbm
 
     // File rows run bottom-to-top: file row 0 is the image's bottom row,
     // which lands at in-memory row hh-1. Normalise big-endian samples to
-    // the little-endian in-memory contract on the way in.
+    // the little-endian in-memory contract on the way in. The BE swap
+    // funnels through `swap_bytes_u32_row` so the inner loop walks
+    // `chunks_exact(4)` over `[u8; 4]` blocks LLVM can autovectorize.
     for file_row in 0..hh {
         let mem_row = hh - 1 - file_row;
         let src = &body[file_row * row_bytes..file_row * row_bytes + row_bytes];
@@ -105,12 +107,7 @@ pub(crate) fn decode_pfm_image(h: &Header, body: &[u8]) -> Result<(PbmImage, Pbm
         if info.little_endian {
             dst.copy_from_slice(src);
         } else {
-            for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
-                d[0] = s[3];
-                d[1] = s[2];
-                d[2] = s[1];
-                d[3] = s[0];
-            }
+            swap_bytes_u32_row(src, dst);
         }
     }
 
@@ -202,22 +199,35 @@ pub fn encode_pfm_plane(
 
     // Emit rows bottom-to-top: the first row written is in-memory row
     // h-1 (the image's bottom row). Swap to big-endian on the way out
-    // when requested.
+    // when requested. The BE row swap is funneled through a row-level
+    // helper so the inner loop runs over `[u8; 4]` chunks the compiler
+    // can autovectorize (aarch64 `REV32`, x86 `BSWAP` / `PSHUFB`).
     for file_row in 0..h {
         let mem_row = h - 1 - file_row;
         let src = &plane.data[mem_row * plane.stride..mem_row * plane.stride + row_bytes];
         if little_endian {
             out.extend_from_slice(src);
         } else {
-            for s in src.chunks_exact(4) {
-                out.push(s[3]);
-                out.push(s[2]);
-                out.push(s[1]);
-                out.push(s[0]);
-            }
+            let dst_start = out.len();
+            out.resize(dst_start + row_bytes, 0);
+            swap_bytes_u32_row(src, &mut out[dst_start..]);
         }
     }
     Ok(out)
+}
+
+/// Row-level byte-swap for 4-byte float samples. `src` and `dst` must be
+/// the same length and a multiple of 4. The inner loop walks
+/// `chunks_exact(4)` over both sides so LLVM lowers it to vector
+/// `swap_bytes` (`REV32.16B` on aarch64; `pshufb` / `vpshufb` on x86).
+#[inline]
+fn swap_bytes_u32_row(src: &[u8], dst: &mut [u8]) {
+    debug_assert_eq!(src.len(), dst.len());
+    debug_assert_eq!(src.len() % 4, 0);
+    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+        let v = u32::from_le_bytes([s[0], s[1], s[2], s[3]]).swap_bytes();
+        d.copy_from_slice(&v.to_le_bytes());
+    }
 }
 
 /// Format a scale value so it always carries a decimal point (or
@@ -380,5 +390,39 @@ mod tests {
         let img = float_image(1, 1, 1);
         assert!(encode_pfm(&img, true, 0.0).is_err());
         assert!(encode_pfm(&img, true, f32::INFINITY).is_err());
+    }
+
+    #[test]
+    fn swap_bytes_u32_row_swaps_every_sample() {
+        // Four samples covering the full byte range.
+        let src: [u8; 16] = [
+            0x12, 0x34, 0x56, 0x78, // sample 0
+            0xff, 0x00, 0xa5, 0x5a, // sample 1
+            0xde, 0xad, 0xbe, 0xef, // sample 2
+            0x00, 0x11, 0x22, 0x33, // sample 3
+        ];
+        let mut dst = [0u8; 16];
+        swap_bytes_u32_row(&src, &mut dst);
+        assert_eq!(
+            dst,
+            [
+                0x78, 0x56, 0x34, 0x12, // sample 0 reversed
+                0x5a, 0xa5, 0x00, 0xff, // sample 1 reversed
+                0xef, 0xbe, 0xad, 0xde, // sample 2 reversed
+                0x33, 0x22, 0x11, 0x00, // sample 3 reversed
+            ]
+        );
+    }
+
+    #[test]
+    fn swap_bytes_u32_row_is_self_inverse() {
+        let src: [u8; 12] = [
+            0xaa, 0xbb, 0xcc, 0xdd, 0x01, 0x02, 0x03, 0x04, 0xfe, 0xed, 0xfa, 0xce,
+        ];
+        let mut once = [0u8; 12];
+        swap_bytes_u32_row(&src, &mut once);
+        let mut twice = [0u8; 12];
+        swap_bytes_u32_row(&once, &mut twice);
+        assert_eq!(twice, src);
     }
 }
