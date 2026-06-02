@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Round 210: P5 / P6 / P7 16-bit binary body hot paths factored through
+  row-level helpers (`read_be16_row` / `write_be16_row`), mirroring
+  the shape of the round-205 PFM 32-bit helper. The decode loop now
+  walks `chunks_exact(2)` zipped with `out.iter_mut()` and the encode
+  loop writes into a pre-sized `vec![0u8; samples.len() * 2]` via
+  `chunks_exact_mut(2)` instead of `Vec::extend_from_slice`. The inner
+  load / `from_be_bytes` / store sequence lowers to a vectorised
+  byte-swap lane (`REV16.16B` on aarch64, `pshufb` / `vpshufb` on x86)
+  without any hand-rolled intrinsics. Measured on apple-silicon
+  against the round-205 baseline:
+  - encode `P5` 16-bit 640×480 217.7 µs → 208.5 µs (≈ -4 %).
+  - encode `P6` 16-bit 320×240 157.8 µs → 154.6 µs (≈ -2 %).
+  - encode `P7` `RGBA64` 320×240 204.1 µs → 207.4 µs (within noise).
+  Decode 16-bit paths reuse the same `read_be16_row` helper and stay
+  flat (~213 µs P5 / ~93 µs P6 / ~80 µs P7 at the same sizes). The
+  win is largest on the encode side because the original
+  `Vec::extend_from_slice` path inhibited the SIMD lowering; the
+  pre-sized destination unlocks it. Adds three unit tests covering
+  `read_be16_row`, `write_be16_row`, and their round-trip
+  self-inverse property; the existing P5/P6/P7 round-trip suites
+  already exercise the row layout end-to-end.
+
 - Round 205: Portable FloatMap big-endian byte-swap hot path. The per-sample
   4-byte swap that round 199's PFM benches flagged as the obvious SIMD
   target (encode `Pf` BE ~1.86 GiB/s vs LE ~42 GiB/s, `PF` BE ~1.86 GiB/s

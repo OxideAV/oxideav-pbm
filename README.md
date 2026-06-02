@@ -149,7 +149,13 @@ future optimisation rounds can A/B-compare SIMD byte-swap (P5/P6
 ASCII writers (P2/P3) against a stable baseline. Indicative
 apple-silicon numbers on the binary path: ~1.7 GiB/s P6 8-bit
 decode, ~6.9 GiB/s P7 16-bit RGBA decode, ~26 GiB/s P7 8-bit
-GRAYSCALE_ALPHA encode. Round 205 closed the PFM big-endian
+GRAYSCALE_ALPHA encode. Round 210 factored the P5 / P6 / P7 16-bit
+big-endian decode and encode hot paths through row-level
+`read_be16_row` / `write_be16_row` helpers (same shape as
+round 205's PFM 32-bit helper), letting the inner load /
+`from_be_bytes` / `to_be_bytes` sequence lower to a vectorised
+byte-swap lane (`REV16.16B` on aarch64; `pshufb` / `vpshufb` on
+x86). Round 205 closed the PFM big-endian
 byte-swap bottleneck flagged in round 199: the per-sample
 `out.push(s[3]); out.push(s[2]); out.push(s[1]); out.push(s[0])`
 loop is now a row-level `swap_bytes_u32_row` helper that walks

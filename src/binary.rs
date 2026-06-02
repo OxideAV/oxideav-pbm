@@ -85,9 +85,15 @@ pub fn decode_binary(h: &Header, data: &[u8]) -> Result<DecodedSamples> {
                     out[i] = *b as u16;
                 }
             } else {
-                for (i, chunk) in data[..need].chunks_exact(2).enumerate() {
-                    out[i] = u16::from_be_bytes([chunk[0], chunk[1]]);
-                }
+                // 16-bit samples are big-endian on disk; the in-memory
+                // `[u16]` is native. Walk `chunks_exact(2)` zipped with
+                // `out.iter_mut()` so LLVM can lower the inner load /
+                // byte-swap / store sequence to a vectorised
+                // `from_be_bytes` lane (`REV16.16B` on aarch64,
+                // `pshufb` / `vpshufb` on x86) instead of going via
+                // indexed access. Mirrors the row-level shape used by
+                // the PFM 32-bit helper in `src/pfm.rs`.
+                read_be16_row(&data[..need], &mut out[..total_samples]);
             }
             // Validate that no sample exceeds maxval (the spec allows
             // implementations to clamp instead, but a strict check
@@ -139,17 +145,50 @@ pub fn encode_p4_body(width: u32, height: u32, bits: &[u8]) -> Vec<u8> {
 /// big-endian samples.
 pub fn encode_binary_body(samples: &[u16], maxval: u32) -> Vec<u8> {
     if maxval <= 255 {
-        let mut out = Vec::with_capacity(samples.len());
-        for &s in samples {
-            out.push(s as u8);
+        let mut out = vec![0u8; samples.len()];
+        for (s, d) in samples.iter().zip(out.iter_mut()) {
+            *d = *s as u8;
         }
         out
     } else {
-        let mut out = Vec::with_capacity(samples.len() * 2);
-        for &s in samples {
-            out.extend_from_slice(&s.to_be_bytes());
-        }
+        // 16-bit samples emit big-endian on disk. Pre-size the
+        // destination and walk `chunks_exact_mut(2)` zipped with
+        // `samples.iter()` so the inner load / byte-swap / store
+        // sequence lowers to a vector `swap_bytes` lane
+        // (`REV16.16B` on aarch64, `pshufb` / `vpshufb` on x86)
+        // instead of running through `Vec::extend_from_slice`. Same
+        // shape as the PFM 32-bit helper in `src/pfm.rs`.
+        let mut out = vec![0u8; samples.len() * 2];
+        write_be16_row(samples, &mut out);
         out
+    }
+}
+
+/// Decode `src` as a big-endian `u16` row into `dst`. `src.len()` must
+/// be `dst.len() * 2`. The inner loop walks `chunks_exact(2)` over
+/// `src` zipped with `dst.iter_mut()` so LLVM can lower the load /
+/// byte-swap / store sequence to a vector `from_be_bytes` lane
+/// (`REV16.16B` on aarch64; `pshufb` / `vpshufb` on x86).
+#[inline]
+fn read_be16_row(src: &[u8], dst: &mut [u16]) {
+    debug_assert_eq!(src.len(), dst.len() * 2);
+    for (s, d) in src.chunks_exact(2).zip(dst.iter_mut()) {
+        *d = u16::from_be_bytes([s[0], s[1]]);
+    }
+}
+
+/// Encode `src` as a big-endian `u16` row into `dst`. `dst.len()` must
+/// be `src.len() * 2`. The inner loop walks `src.iter()` zipped with
+/// `dst.chunks_exact_mut(2)` so LLVM can lower the load / byte-swap /
+/// store sequence to a vector `to_be_bytes` lane (`REV16.16B` on
+/// aarch64; `pshufb` / `vpshufb` on x86).
+#[inline]
+fn write_be16_row(src: &[u16], dst: &mut [u8]) {
+    debug_assert_eq!(dst.len(), src.len() * 2);
+    for (s, d) in src.iter().zip(dst.chunks_exact_mut(2)) {
+        let b = s.to_be_bytes();
+        d[0] = b[0];
+        d[1] = b[1];
     }
 }
 
@@ -193,5 +232,35 @@ mod tests {
         assert_eq!(bytes, [0x12, 0x34, 0xFE, 0xDC]);
         let bytes8 = encode_binary_body(&[10, 20], 100);
         assert_eq!(bytes8, [10, 20]);
+    }
+
+    #[test]
+    fn read_be16_row_decodes_every_sample() {
+        // 4 samples across 8 bytes, mixing high/low bytes to surface
+        // any accidental byte ordering bug.
+        let src: [u8; 8] = [0x00, 0x01, 0xFF, 0xFE, 0x12, 0x34, 0x80, 0x00];
+        let mut dst = [0u16; 4];
+        read_be16_row(&src, &mut dst);
+        assert_eq!(dst, [0x0001, 0xFFFE, 0x1234, 0x8000]);
+    }
+
+    #[test]
+    fn write_be16_row_encodes_every_sample() {
+        let src = [0x0001u16, 0xFFFE, 0x1234, 0x8000];
+        let mut dst = [0u8; 8];
+        write_be16_row(&src, &mut dst);
+        assert_eq!(dst, [0x00, 0x01, 0xFF, 0xFE, 0x12, 0x34, 0x80, 0x00]);
+    }
+
+    #[test]
+    fn be16_row_helpers_round_trip() {
+        // Self-inverse: encode-then-decode reconstructs the original
+        // sample sequence exactly, with no boundary corruption.
+        let src: [u16; 7] = [0x0000, 0x00FF, 0xFF00, 0xFFFF, 0xDEAD, 0xBEEF, 0xCAFE];
+        let mut bytes = vec![0u8; src.len() * 2];
+        write_be16_row(&src, &mut bytes);
+        let mut round_trip = vec![0u16; src.len()];
+        read_be16_row(&bytes, &mut round_trip);
+        assert_eq!(round_trip.as_slice(), &src);
     }
 }
