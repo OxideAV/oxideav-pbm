@@ -155,7 +155,15 @@ encode bottleneck: the LE→BE row swap for `Gray16Le` / `Rgb48Le` /
 `RGB_ALPHA`) now funnels through a dedicated row-level
 `swap_bytes_u16_row` helper that walks `chunks_exact(2)` over a
 pre-resized `&mut [u8]` destination — same shape as the
-round-205 PFM 32-bit helper. Round 210's `write_be16_row` helper
+round-205 PFM 32-bit helper. Round 222 closed the remaining symmetry
+gap: `encode_p7_gray16` (PAM `GRAYSCALE` depth-1 16-bit, only
+reachable via the explicit `Pam7` selector with `Gray16Le`) was the
+last 16-bit encode path still using the per-sample
+`out.push(chunk[1]); out.push(chunk[0])` pattern; it now shares the
+same row-level helper as P5 / P6 / P7 RGB / RGBA, with a dedicated
+benchmark (`encode_p7_gray16_320x240`) and a regression test that
+asserts byte-equivalence against the canonical P5 16-bit path.
+Round 210's `write_be16_row` helper
 took `&[u16]` natively, so the encode paths that hold an LE byte
 plane (no `Vec<u16>` materialisation) needed their own variant.
 Apple-silicon numbers against the round-210 baseline: encode P5

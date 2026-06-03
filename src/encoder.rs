@@ -448,13 +448,22 @@ fn encode_p7_gray8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
 
 fn encode_p7_gray16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     let mut out = header_pam(w, h, 1, 65535, "GRAYSCALE");
+    // Identical body shape to P5 16-bit (PAM `GRAYSCALE` with depth 1 is
+    // a single-sample row-major stream); funnel the LE→BE swap through
+    // the row-level `swap_bytes_u16_row` helper so the inner loop walks
+    // `chunks_exact(2)` over a pre-sized `&mut [u8]` destination and
+    // lowers to a vectorised swap (`REV16.16B` on aarch64; `pshufb` /
+    // `vpshufb` on x86). Closes the round-217 symmetry gap that left
+    // this path on the per-sample `out.push(chunk[1]); out.push(chunk[0])`
+    // pattern while the P5 / P6 / P7 RGB / RGBA 16-bit siblings all
+    // moved to the helper.
+    let row_bytes = w * 2;
+    let body_start = out.len();
+    out.resize(body_start + row_bytes * h, 0);
     for y in 0..h {
-        let row = &plane.data[y * plane.stride..y * plane.stride + w * 2];
-        // `Gray16Le` is LE in memory; on-disk PAM wants big-endian.
-        for chunk in row.chunks_exact(2) {
-            out.push(chunk[1]);
-            out.push(chunk[0]);
-        }
+        let src = &plane.data[y * plane.stride..y * plane.stride + row_bytes];
+        let dst = &mut out[body_start + y * row_bytes..body_start + (y + 1) * row_bytes];
+        swap_bytes_u16_row(src, dst);
     }
     Ok(out)
 }
@@ -689,5 +698,44 @@ mod tests {
         let auto = encode_pbm_ascii(&img).unwrap();
         let explicit = encode_pbm_with_format(&img, PbmEncodeFormat::AutoAscii).unwrap();
         assert_eq!(auto, explicit);
+    }
+
+    #[test]
+    fn explicit_format_pam7_gray16_be_swap() {
+        // P7 GRAYSCALE 16-bit must emit the same big-endian byte sequence
+        // as P5 16-bit for the same source LE plane. Regression for the
+        // round-217 symmetry gap: `encode_p7_gray16` was the only 16-bit
+        // encode path still using per-sample `out.push(chunk[1]);
+        // out.push(chunk[0])`. After the round-222 refactor the helper
+        // is shared, so the body bytes must agree with the canonical
+        // P5 path.
+        let img = make_image(
+            PbmPixelFormat::Gray16Le,
+            3,
+            2,
+            6,
+            // Six LE samples covering high/low byte mixes: 0x1234,
+            // 0x00FF, 0xFF00, 0xCAFE, 0xDEAD, 0xBEEF.
+            vec![
+                0x34, 0x12, 0xff, 0x00, 0x00, 0xff, 0xfe, 0xca, 0xad, 0xde, 0xef, 0xbe,
+            ],
+        );
+        let pam = encode_pbm_with_format(&img, PbmEncodeFormat::Pam7).unwrap();
+        let p5 = encode_pbm_with_format(&img, PbmEncodeFormat::Pnm5).unwrap();
+        // PAM header is longer; compare the trailing 12 body bytes only.
+        let pam_body = &pam[pam.len() - 12..];
+        let p5_body = &p5[p5.len() - 12..];
+        assert_eq!(pam_body, p5_body);
+        // Spot-check: 0x1234 LE → 0x12 0x34 on disk.
+        assert_eq!(
+            pam_body,
+            &[0x12, 0x34, 0x00, 0xff, 0xff, 0x00, 0xca, 0xfe, 0xde, 0xad, 0xbe, 0xef]
+        );
+        // The PAM header must declare DEPTH 1 + GRAYSCALE + MAXVAL 65535.
+        let hdr_end = pam.iter().position(|&b| b == 0x12).unwrap();
+        let s = std::str::from_utf8(&pam[..hdr_end]).unwrap();
+        assert!(s.contains("DEPTH 1"));
+        assert!(s.contains("TUPLTYPE GRAYSCALE"));
+        assert!(s.contains("MAXVAL 65535"));
     }
 }

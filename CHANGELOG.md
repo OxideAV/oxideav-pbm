@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Round 222: PAM `GRAYSCALE` 16-bit encode (`encode_p7_gray16`) now
+  shares the round-217 `swap_bytes_u16_row` row-level helper instead
+  of the per-sample `out.push(chunk[1]); out.push(chunk[0])` loop the
+  path retained when its P5 / P6 / P7 RGB / RGBA siblings moved to the
+  helper. The path is only reachable via the explicit `Pam7` encode
+  selector with `Gray16Le` (the auto routing for `Gray16Le` goes to
+  P5), so it was the lone 16-bit encode hot path still on the scalar
+  pattern. Added a dedicated `encode_p7_gray16_320x240` criterion
+  bench and a regression unit test asserting byte-equivalence against
+  the canonical P5 16-bit body.
 - Round 217: 16-bit encode LE→BE row swap factored through a dedicated
   `swap_bytes_u16_row(&[u8], &mut [u8])` helper in `binary.rs`,
   mirroring the round-205 PFM 32-bit helper's shape. The encode hot
