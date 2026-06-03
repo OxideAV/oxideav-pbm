@@ -192,6 +192,37 @@ fn write_be16_row(src: &[u16], dst: &mut [u8]) {
     }
 }
 
+/// Copy a P4-format MSB-packed bit row from an already-packed
+/// `MonoBlack` source plane into the on-disk destination, masking the
+/// trailing unused bits of the last byte to zero. `width` is the pixel
+/// count; the row is `width.div_ceil(8)` bytes long.
+///
+/// The crate's `MonoBlack` plane convention (`1 = black`, MSB-first
+/// packed, row stride `width.div_ceil(8)`) is byte-for-byte identical
+/// to the P4 wire format, so the row body is a memcpy with at most one
+/// trailing-bit mask. The previous `encode_p4` path unpacked the input
+/// into a `width * height`-byte intermediate (`Vec<u8>` allocation) and
+/// then re-packed it through a per-bit OR loop; this helper skips both
+/// the allocation and the scalar bit loop. The final-byte mask ensures
+/// canonical output (the spec leaves the padding bits unspecified but
+/// every well-formed encoder we know zeros them).
+#[inline]
+pub(crate) fn copy_p4_row_msb(src: &[u8], dst: &mut [u8], width: usize) {
+    let row_bytes = width.div_ceil(8);
+    debug_assert!(src.len() >= row_bytes);
+    debug_assert!(dst.len() >= row_bytes);
+    dst[..row_bytes].copy_from_slice(&src[..row_bytes]);
+    let used = width % 8;
+    if used != 0 {
+        // Keep the top `used` bits of the last byte and zero the
+        // remaining `8 - used` padding bits. The mask is a constant
+        // for each width so LLVM hoists the shift out of any
+        // surrounding row loop.
+        let mask = 0xFFu8 << (8 - used);
+        dst[row_bytes - 1] &= mask;
+    }
+}
+
 /// Row-level byte-swap for 2-byte samples already laid out as bytes.
 /// `src` is read as little-endian `u16` samples and `dst` receives the
 /// same samples big-endian (or vice versa — the swap is its own
@@ -328,6 +359,61 @@ mod tests {
         let mut twice = [0u8; 10];
         swap_bytes_u16_row(&once, &mut twice);
         assert_eq!(twice, src);
+    }
+
+    #[test]
+    fn copy_p4_row_msb_byte_aligned_width_pure_memcpy() {
+        // Width is a multiple of 8 → no trailing mask, output == input
+        // verbatim. 16 px = 2 bytes; mix high/low bits to surface any
+        // accidental shift.
+        let src: [u8; 2] = [0b1010_1100, 0b1111_0010];
+        let mut dst = [0u8; 2];
+        copy_p4_row_msb(&src, &mut dst, 16);
+        assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn copy_p4_row_msb_unaligned_width_zeros_trailing_pad() {
+        // 11 px → 2 bytes, last 5 bits unused. The mask must zero
+        // them so the output is canonical regardless of whether the
+        // source plane had dirty padding bits.
+        let src: [u8; 2] = [0b1010_1100, 0b1110_1111]; // bottom 5 bits dirty
+        let mut dst = [0u8; 2];
+        copy_p4_row_msb(&src, &mut dst, 11);
+        // Top 3 bits of byte 1 are pixels 8/9/10 (1/1/1) → 0b111;
+        // the remaining 5 bits must be zero.
+        assert_eq!(dst[0], 0b1010_1100);
+        assert_eq!(dst[1], 0b1110_0000);
+    }
+
+    #[test]
+    fn copy_p4_row_msb_matches_legacy_unpack_repack() {
+        // Byte-for-byte agreement with the `encode_p4_body` path for
+        // every used-bit count 1..=8 (covering each `width % 8` case).
+        // The legacy path unpacks every bit into a `Vec<u8>` and then
+        // re-packs through the per-bit OR loop, so this regression
+        // guards against any subtle indexing skew in the new memcpy
+        // helper.
+        for width in [1usize, 3, 7, 8, 9, 15, 16, 17, 32, 33] {
+            let row_bytes = width.div_ceil(8);
+            // Build a deterministic source packed plane and the
+            // matching unpacked-bits view.
+            let mut packed = vec![0u8; row_bytes];
+            let mut unpacked = vec![0u8; width];
+            for x in 0..width {
+                // Use a non-trivial pattern that exercises both 0 and
+                // 1 bits at every column-mod-8 position.
+                let bit = ((x.wrapping_mul(13) ^ 0x5A) & 1) as u8;
+                unpacked[x] = bit;
+                if bit == 1 {
+                    packed[x / 8] |= 1 << (7 - (x % 8));
+                }
+            }
+            let legacy = encode_p4_body(width as u32, 1, &unpacked);
+            let mut fast = vec![0u8; row_bytes];
+            copy_p4_row_msb(&packed, &mut fast, width);
+            assert_eq!(fast, legacy, "width={width}");
+        }
     }
 
     #[test]

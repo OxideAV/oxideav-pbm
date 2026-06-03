@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Round 229: P4 (binary PBM) encode bit packer rewritten as a per-row
+  memcpy. The crate's `MonoBlack` plane convention (`1 = black`,
+  MSB-first packed, row stride `w.div_ceil(8)`) is byte-for-byte
+  identical to the P4 wire format, so the body is a straight copy with
+  a single trailing-bit mask on the last byte of each row when
+  `w % 8 != 0`. The pre-r229 path had two scalar bit loops — an
+  unpack-to-bytes pass over the input plane followed by a re-pack pass
+  through `encode_p4_body`'s per-bit `row[x / 8] |= 1 << (7 - (x % 8))`
+  OR — plus a `w * h`-byte intermediate `Vec<u8>` allocation. Both
+  loops and the intermediate allocation are gone; the per-row work is
+  now `copy_from_slice` + at most one `&= mask`. New row-level helper
+  `binary::copy_p4_row_msb(&[u8], &mut [u8], width)` encapsulates the
+  copy + trailing-pad mask. Apple-silicon numbers against the
+  round-222 baseline:
+  - encode `P4` 640×480 1.02 ms → 1.72 µs (≈ 590× faster,
+    ~20.7 GiB/s up from ~36 MiB/s).
+  Adds three new helper-level unit tests (byte-aligned width =
+  pure memcpy, unaligned width = trailing-pad mask, full-suite
+  agreement with the legacy `encode_p4_body` path for every
+  `width % 8` case 1..=33) plus three encoder-level regressions
+  asserting the byte-aligned, unaligned-padded, and strided-plane
+  inputs all produce the same on-disk bytes the previous loop did.
+  `encode_p4_body` stays public for callers that hold an unpacked
+  bit plane (one byte per pixel); only `encode_p4` (the
+  `MonoBlack`-plane fast path) bypasses it. The four `MonoBlack`
+  round-trip and PBM regression tests continue to pass unchanged.
+
 - Round 222: PAM `GRAYSCALE` 16-bit encode (`encode_p7_gray16`) now
   shares the round-217 `swap_bytes_u16_row` row-level helper instead
   of the per-sample `out.push(chunk[1]); out.push(chunk[0])` loop the

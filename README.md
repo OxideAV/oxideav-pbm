@@ -149,7 +149,17 @@ future optimisation rounds can A/B-compare SIMD byte-swap (P5/P6
 ASCII writers (P2/P3) against a stable baseline. Indicative
 apple-silicon numbers on the binary path: ~1.7 GiB/s P6 8-bit
 decode, ~6.9 GiB/s P7 16-bit RGBA decode, ~26 GiB/s P7 8-bit
-GRAYSCALE_ALPHA encode. Round 217 closed the remaining 16-bit
+GRAYSCALE_ALPHA encode. Round 229 closed the last remaining bit-pack
+bottleneck flagged by both the encode + decode bench headers:
+`encode_p4` (binary PBM, MSB-packed bits) no longer unpacks the input
+into a `w * h`-byte intermediate and re-packs it through a per-bit
+OR loop. The crate's `MonoBlack` plane convention (`1 = black`,
+MSB-first packed, row stride `w.div_ceil(8)`) is byte-for-byte
+identical to the P4 wire format, so the body is now a per-row
+`copy_from_slice` plus a one-byte trailing-pad mask on widths not a
+multiple of 8 — encoded by a dedicated row-level helper
+`copy_p4_row_msb`. Apple-silicon: encode `P4` 640×480 1.02 ms →
+~1.72 µs (≈ 590× faster, ~20.7 GiB/s). Round 217 closed the remaining 16-bit
 encode bottleneck: the LE→BE row swap for `Gray16Le` / `Rgb48Le` /
 `Rgba64Le` planes (P5 16-bit, P6 16-bit, P7 16-bit `RGB` /
 `RGB_ALPHA`) now funnels through a dedicated row-level

@@ -27,7 +27,7 @@
 use crate::error::{PbmError as Error, Result};
 
 use crate::ascii::{encode_ascii_body_bits, encode_ascii_body_u8};
-use crate::binary::{encode_p4_body, swap_bytes_u16_row};
+use crate::binary::{copy_p4_row_msb, swap_bytes_u16_row};
 use crate::image::{PbmImage, PbmPixelFormat, PbmPlane};
 
 #[cfg(feature = "registry")]
@@ -356,22 +356,33 @@ fn header_pnm(magic: u8, w: usize, h: usize, maxval: Option<u32>) -> Vec<u8> {
 }
 
 fn encode_p4(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
-    // Input is `MonoBlack`: MSB-first packed bits, 1 = black, rows
-    // padded to a byte. P4's wire format is identical, but we may have
-    // an input stride larger than the spec's row_bytes — repack just
-    // in case.
+    // The crate's `MonoBlack` plane convention (`1 = black`, MSB-first
+    // packed, row stride `w.div_ceil(8)`) is byte-for-byte identical
+    // to the P4 wire format, so the body is a per-row memcpy from the
+    // plane to the output (with a trailing-bit mask on the last byte
+    // of each row when `w % 8 != 0`). The pre-r229 path unpacked the
+    // input into a `w * h`-byte intermediate (`Vec<u8>` allocation,
+    // ~307 KiB at 640×480) and then re-packed it through the per-bit
+    // OR loop in `encode_p4_body`, which forced a scalar bit loop on
+    // both the unpack and repack passes. The new path:
+    //
+    //   1. Pre-resizes the output `Vec` to header + body in one go,
+    //      so each row is written into a `&mut [u8]` slice (no
+    //      `Vec::push`/`extend` calls that would inhibit SIMD).
+    //   2. Calls `copy_p4_row_msb` per row, which lowers to a
+    //      vectorised memcpy + a single-byte trailing-bit mask.
+    //
+    // Net effect at 640×480: one ~307 KiB allocation gone, the inner
+    // bit loops gone, the body work is a straight memcpy lane.
     let row_bytes = w.div_ceil(8);
-    let mut bits = vec![0u8; w * h];
-    for y in 0..h {
-        let row = &plane.data[y * plane.stride..y * plane.stride + row_bytes];
-        for x in 0..w {
-            let bit = (row[x / 8] >> (7 - (x % 8))) & 1;
-            bits[y * w + x] = bit;
-        }
-    }
-    let body = encode_p4_body(w as u32, h as u32, &bits);
     let mut out = header_pnm(b'4', w, h, None);
-    out.extend(body);
+    let body_start = out.len();
+    out.resize(body_start + row_bytes * h, 0);
+    for y in 0..h {
+        let src = &plane.data[y * plane.stride..y * plane.stride + row_bytes];
+        let dst = &mut out[body_start + y * row_bytes..body_start + (y + 1) * row_bytes];
+        copy_p4_row_msb(src, dst, w);
+    }
     Ok(out)
 }
 
@@ -698,6 +709,89 @@ mod tests {
         let auto = encode_pbm_ascii(&img).unwrap();
         let explicit = encode_pbm_with_format(&img, PbmEncodeFormat::AutoAscii).unwrap();
         assert_eq!(auto, explicit);
+    }
+
+    #[test]
+    fn encode_p4_byte_aligned_width_round_trips() {
+        // 16 px = exact 2 byte-row width — no trailing-bit mask
+        // involvement. The body must match the input plane bytes.
+        let img = make_image(
+            PbmPixelFormat::MonoBlack,
+            16,
+            2,
+            2,
+            vec![0b1010_1100, 0b1111_0010, 0b0101_0101, 0b1110_0001],
+        );
+        let bytes = encode_pbm(&img).unwrap();
+        assert!(bytes.starts_with(b"P4\n16 2\n"));
+        let body = &bytes[bytes.len() - 4..];
+        assert_eq!(body, &[0b1010_1100, 0b1111_0010, 0b0101_0101, 0b1110_0001]);
+    }
+
+    #[test]
+    fn encode_p4_unaligned_width_zeros_trailing_pad() {
+        // 11 px = 2 bytes per row with 5 padding bits at the tail of
+        // each row. The encoder must zero those padding bits regardless
+        // of what the source plane held there, so the on-disk bytes are
+        // canonical and the round-205-style memcpy fast path doesn't
+        // leak input garbage.
+        let img = make_image(
+            PbmPixelFormat::MonoBlack,
+            11,
+            1,
+            2,
+            // Dirty padding (bottom 5 bits set) on the input row.
+            vec![0b1010_1100, 0b1111_1111],
+        );
+        let bytes = encode_pbm(&img).unwrap();
+        let body = &bytes[bytes.len() - 2..];
+        // Used bits in byte 1 are pixels 8/9/10 (= 1/1/1) so top 3
+        // bits = 0b111; remaining 5 bits must be zero.
+        assert_eq!(body, &[0b1010_1100, 0b1110_0000]);
+    }
+
+    #[test]
+    fn encode_p4_strided_plane_matches_unstrided() {
+        // The plane.stride may exceed row_bytes (e.g. a caller's image
+        // buffer is padded for alignment). The encoder must walk
+        // exactly `row_bytes` per row and ignore the trailing stride
+        // padding. Build the same image twice — once tight, once
+        // padded — and assert the two outputs match byte-for-byte.
+        let tight = make_image(
+            PbmPixelFormat::MonoBlack,
+            11,
+            3,
+            2,
+            vec![
+                0b1010_1100,
+                0b1110_0000, // row 0
+                0b0101_0101,
+                0b0100_0000, // row 1
+                0b1111_0000,
+                0b1000_0000, // row 2
+            ],
+        );
+        let padded = make_image(
+            PbmPixelFormat::MonoBlack,
+            11,
+            3,
+            4, // stride = 4 bytes per row (2 used + 2 padding)
+            vec![
+                0b1010_1100,
+                0b1110_0000,
+                0xFF,
+                0xFF, // row 0 + padding garbage
+                0b0101_0101,
+                0b0100_0000,
+                0xCC,
+                0xCC,
+                0b1111_0000,
+                0b1000_0000,
+                0xAA,
+                0xAA,
+            ],
+        );
+        assert_eq!(encode_pbm(&tight).unwrap(), encode_pbm(&padded).unwrap());
     }
 
     #[test]
