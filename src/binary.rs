@@ -192,6 +192,34 @@ fn write_be16_row(src: &[u16], dst: &mut [u8]) {
     }
 }
 
+/// Row-level byte-swap for 2-byte samples already laid out as bytes.
+/// `src` is read as little-endian `u16` samples and `dst` receives the
+/// same samples big-endian (or vice versa — the swap is its own
+/// inverse). `src.len()` and `dst.len()` must be equal and a multiple
+/// of 2.
+///
+/// The encode hot paths for `Gray16Le` / `Rgb48Le` / `Rgba64Le` planes
+/// take an LE-byte plane directly and write BE-byte Netpbm samples
+/// without ever materialising a `Vec<u16>`. The previous implementation
+/// used `for chunk in row.chunks_exact(2) { out.push(chunk[1]);
+/// out.push(chunk[0]); }`, which forced the swap through individual
+/// `Vec::push` calls and inhibited SIMD lowering. Walking
+/// `chunks_exact(2)` zipped with `chunks_exact_mut(2)` over a
+/// pre-resized `&mut [u8]` destination lets LLVM lower the inner load /
+/// byte-swap / store sequence to a vector `swap_bytes` lane
+/// (`REV16.16B` on aarch64; `pshufb` / `vpshufb` on x86). Same shape as
+/// the PFM 32-bit helper [`crate::pfm::swap_bytes_u32_row`] introduced
+/// in round 205.
+#[inline]
+pub(crate) fn swap_bytes_u16_row(src: &[u8], dst: &mut [u8]) {
+    debug_assert_eq!(src.len(), dst.len());
+    debug_assert_eq!(src.len() % 2, 0);
+    for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(2)) {
+        d[0] = s[1];
+        d[1] = s[0];
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,5 +290,59 @@ mod tests {
         let mut round_trip = vec![0u16; src.len()];
         read_be16_row(&bytes, &mut round_trip);
         assert_eq!(round_trip.as_slice(), &src);
+    }
+
+    #[test]
+    fn swap_bytes_u16_row_swaps_every_sample() {
+        // Six samples mixing high/low bytes to surface any indexing
+        // off-by-one in the chunked swap kernel.
+        let src: [u8; 12] = [
+            0x12, 0x34, // sample 0
+            0xff, 0x00, // sample 1
+            0xa5, 0x5a, // sample 2
+            0x00, 0xff, // sample 3
+            0xde, 0xad, // sample 4
+            0xbe, 0xef, // sample 5
+        ];
+        let mut dst = [0u8; 12];
+        swap_bytes_u16_row(&src, &mut dst);
+        assert_eq!(
+            dst,
+            [
+                0x34, 0x12, // sample 0 reversed
+                0x00, 0xff, // sample 1 reversed
+                0x5a, 0xa5, // sample 2 reversed
+                0xff, 0x00, // sample 3 reversed
+                0xad, 0xde, // sample 4 reversed
+                0xef, 0xbe, // sample 5 reversed
+            ]
+        );
+    }
+
+    #[test]
+    fn swap_bytes_u16_row_is_self_inverse() {
+        // Swapping twice must reconstruct the original byte sequence.
+        let src: [u8; 10] = [0xaa, 0xbb, 0x01, 0x02, 0xfe, 0xed, 0x80, 0x00, 0xca, 0xfe];
+        let mut once = [0u8; 10];
+        swap_bytes_u16_row(&src, &mut once);
+        let mut twice = [0u8; 10];
+        swap_bytes_u16_row(&once, &mut twice);
+        assert_eq!(twice, src);
+    }
+
+    #[test]
+    fn swap_bytes_u16_row_matches_per_sample_le_to_be() {
+        // The helper's output must agree byte-for-byte with the scalar
+        // `u16::from_le_bytes(…).to_be_bytes()` reference path the
+        // encoder hot paths used before the round-217 refactor.
+        let src: [u8; 8] = [0x34, 0x12, 0x78, 0x56, 0xff, 0x00, 0x00, 0x80];
+        let mut got = [0u8; 8];
+        swap_bytes_u16_row(&src, &mut got);
+        let mut expected = [0u8; 8];
+        for (s, d) in src.chunks_exact(2).zip(expected.chunks_exact_mut(2)) {
+            let v = u16::from_le_bytes([s[0], s[1]]).to_be_bytes();
+            d.copy_from_slice(&v);
+        }
+        assert_eq!(got, expected);
     }
 }

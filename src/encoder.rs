@@ -27,7 +27,7 @@
 use crate::error::{PbmError as Error, Result};
 
 use crate::ascii::{encode_ascii_body_bits, encode_ascii_body_u8};
-use crate::binary::encode_p4_body;
+use crate::binary::{encode_p4_body, swap_bytes_u16_row};
 use crate::image::{PbmImage, PbmPixelFormat, PbmPlane};
 
 #[cfg(feature = "registry")]
@@ -385,13 +385,19 @@ fn encode_p5_gray8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
 
 fn encode_p5_gray16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     let mut out = header_pnm(b'5', w, h, Some(65535));
+    // `Gray16Le` stores LE bytes; on-disk Netpbm wants BE. Funnel the
+    // per-row LE→BE swap through the row-level `swap_bytes_u16_row`
+    // helper from `binary.rs` so the inner loop walks
+    // `chunks_exact(2)` over a pre-sized `&mut [u8]` destination and
+    // lowers to a vectorised swap (`REV16.16B` on aarch64, `pshufb` /
+    // `vpshufb` on x86). Same shape as the round-205 PFM 32-bit helper.
+    let row_bytes = w * 2;
+    let body_start = out.len();
+    out.resize(body_start + row_bytes * h, 0);
     for y in 0..h {
-        let row = &plane.data[y * plane.stride..y * plane.stride + w * 2];
-        // `Gray16Le` stores LE; on-disk Netpbm wants BE.
-        for chunk in row.chunks_exact(2) {
-            out.push(chunk[1]);
-            out.push(chunk[0]);
-        }
+        let src = &plane.data[y * plane.stride..y * plane.stride + row_bytes];
+        let dst = &mut out[body_start + y * row_bytes..body_start + (y + 1) * row_bytes];
+        swap_bytes_u16_row(src, dst);
     }
     Ok(out)
 }
@@ -406,12 +412,16 @@ fn encode_p6_rgb8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
 
 fn encode_p6_rgb16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     let mut out = header_pnm(b'6', w, h, Some(65535));
+    // Same LE→BE row swap as P5 16-bit, but three samples per pixel.
+    // The chunked swap is channel-agnostic (it just walks 2-byte
+    // samples), so 3 channels reuses the helper unchanged.
+    let row_bytes = w * 6;
+    let body_start = out.len();
+    out.resize(body_start + row_bytes * h, 0);
     for y in 0..h {
-        let row = &plane.data[y * plane.stride..y * plane.stride + w * 6];
-        for chunk in row.chunks_exact(2) {
-            out.push(chunk[1]);
-            out.push(chunk[0]);
-        }
+        let src = &plane.data[y * plane.stride..y * plane.stride + row_bytes];
+        let dst = &mut out[body_start + y * row_bytes..body_start + (y + 1) * row_bytes];
+        swap_bytes_u16_row(src, dst);
     }
     Ok(out)
 }
@@ -459,12 +469,15 @@ fn encode_p7_rgb8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
 
 fn encode_p7_rgb16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     let mut out = header_pam(w, h, 3, 65535, "RGB");
+    // Identical body shape to P6 16-bit (PAM with `RGB` tupltype is the
+    // same row-major three-sample layout); reuse the row-level swap.
+    let row_bytes = w * 6;
+    let body_start = out.len();
+    out.resize(body_start + row_bytes * h, 0);
     for y in 0..h {
-        let row = &plane.data[y * plane.stride..y * plane.stride + w * 6];
-        for chunk in row.chunks_exact(2) {
-            out.push(chunk[1]);
-            out.push(chunk[0]);
-        }
+        let src = &plane.data[y * plane.stride..y * plane.stride + row_bytes];
+        let dst = &mut out[body_start + y * row_bytes..body_start + (y + 1) * row_bytes];
+        swap_bytes_u16_row(src, dst);
     }
     Ok(out)
 }
@@ -495,13 +508,15 @@ fn encode_p7_bgra8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
 
 fn encode_p7_rgba16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     let mut out = header_pam(w, h, 4, 65535, "RGB_ALPHA");
+    // Four 16-bit channels per pixel (R/G/B/A); the row-level swap is
+    // channel-agnostic so we reuse the same helper.
+    let row_bytes = w * 8;
+    let body_start = out.len();
+    out.resize(body_start + row_bytes * h, 0);
     for y in 0..h {
-        let row = &plane.data[y * plane.stride..y * plane.stride + w * 8];
-        // LE → BE per channel.
-        for chunk in row.chunks_exact(2) {
-            out.push(chunk[1]);
-            out.push(chunk[0]);
-        }
+        let src = &plane.data[y * plane.stride..y * plane.stride + row_bytes];
+        let dst = &mut out[body_start + y * row_bytes..body_start + (y + 1) * row_bytes];
+        swap_bytes_u16_row(src, dst);
     }
     Ok(out)
 }

@@ -149,8 +149,21 @@ future optimisation rounds can A/B-compare SIMD byte-swap (P5/P6
 ASCII writers (P2/P3) against a stable baseline. Indicative
 apple-silicon numbers on the binary path: ~1.7 GiB/s P6 8-bit
 decode, ~6.9 GiB/s P7 16-bit RGBA decode, ~26 GiB/s P7 8-bit
-GRAYSCALE_ALPHA encode. Round 210 factored the P5 / P6 / P7 16-bit
-big-endian decode and encode hot paths through row-level
+GRAYSCALE_ALPHA encode. Round 217 closed the remaining 16-bit
+encode bottleneck: the LE→BE row swap for `Gray16Le` / `Rgb48Le` /
+`Rgba64Le` planes (P5 16-bit, P6 16-bit, P7 16-bit `RGB` /
+`RGB_ALPHA`) now funnels through a dedicated row-level
+`swap_bytes_u16_row` helper that walks `chunks_exact(2)` over a
+pre-resized `&mut [u8]` destination — same shape as the
+round-205 PFM 32-bit helper. Round 210's `write_be16_row` helper
+took `&[u16]` natively, so the encode paths that hold an LE byte
+plane (no `Vec<u16>` materialisation) needed their own variant.
+Apple-silicon numbers against the round-210 baseline: encode P5
+16-bit 640×480 208.5 µs → ~11.8 µs (≈18× faster, ~48 GiB/s),
+encode P6 16-bit 320×240 154.6 µs → ~8.6 µs (≈18× faster,
+~50 GiB/s), encode P7 `RGBA64` 320×240 207.4 µs → ~11.7 µs
+(≈18× faster, ~49 GiB/s). Round 210 factored the P5 / P6 / P7
+16-bit big-endian decode and encode hot paths through row-level
 `read_be16_row` / `write_be16_row` helpers (same shape as
 round 205's PFM 32-bit helper), letting the inner load /
 `from_be_bytes` / `to_be_bytes` sequence lower to a vectorised

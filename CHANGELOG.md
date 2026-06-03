@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Round 217: 16-bit encode LE→BE row swap factored through a dedicated
+  `swap_bytes_u16_row(&[u8], &mut [u8])` helper in `binary.rs`,
+  mirroring the round-205 PFM 32-bit helper's shape. The encode hot
+  paths for `Gray16Le` / `Rgb48Le` / `Rgba64Le` planes hold an LE byte
+  plane directly and need to write BE bytes without ever materialising
+  a `Vec<u16>`, so they could not reuse round 210's
+  `write_be16_row(&[u16], &mut [u8])` (which assumes `&[u16]` input).
+  Pre-r217 the four encode paths (`encode_p5_gray16`,
+  `encode_p6_rgb16`, `encode_p7_rgb16`, `encode_p7_rgba16`) ran
+  `for chunk in row.chunks_exact(2) { out.push(chunk[1]);
+  out.push(chunk[0]); }` — the per-sample `Vec::push` calls
+  forced a scalar loop. The new helper walks `chunks_exact(2)`
+  zipped with `chunks_exact_mut(2)` over a pre-resized destination,
+  letting LLVM lower the swap to a vector lane (`REV16.16B` on
+  aarch64; `pshufb` / `vpshufb` on x86). Apple-silicon numbers against
+  the round-210 baseline:
+  - encode `P5` 16-bit 640×480 208.5 µs → ~11.8 µs (≈18× faster,
+    ~48 GiB/s).
+  - encode `P6` 16-bit 320×240 154.6 µs → ~8.6 µs (≈18× faster,
+    ~50 GiB/s).
+  - encode `P7` `RGBA64` 320×240 207.4 µs → ~11.7 µs (≈18× faster,
+    ~49 GiB/s).
+  (`encode_p7_rgb16` shares the same kernel and gains the same
+  speedup; it has no dedicated bench but is exercised by the P7 RGB
+  16-bit roundtrip suite.) Adds three unit tests covering
+  `swap_bytes_u16_row` (the swap kernel, a self-inverse property, and
+  byte-for-byte agreement with the scalar
+  `u16::from_le_bytes(…).to_be_bytes()` reference path). The existing
+  P5 / P6 / P7 16-bit roundtrip suites already exercise the row layout
+  end-to-end (`encode_p5_gray16_swaps_to_be`,
+  `explicit_format_pam7_rgb16_be_swap`, etc.).
+
 - Round 210: P5 / P6 / P7 16-bit binary body hot paths factored through
   row-level helpers (`read_be16_row` / `write_be16_row`), mirroring
   the shape of the round-205 PFM 32-bit helper. The decode loop now
