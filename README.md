@@ -26,6 +26,23 @@ between samples. Any ASCII whitespace separates header tokens and ASCII
 samples. P1 accepts both canonical token style and whitespace-free digit
 runs. The Portable FloatMap header is the strict exception (see below).
 
+Producers often stash provenance into the header comment block (e.g.
+`# created by …`, `# tool: …`, `# resolution note`). For consumers
+that want to forward that text into a different container or surface
+it in a tool, the crate exposes a typed comment-iteration accessor:
+
+```rust
+let buf = b"P3\n# created by GIMP\n# tool: v2.10\n2 1\n255\n0 0 0 1 1 1\n";
+let comments: Vec<&[u8]> = oxideav_pbm::iter_pnm_header_comments(buf).collect();
+assert_eq!(comments, vec![&b"created by GIMP"[..], &b"tool: v2.10"[..]]);
+```
+
+The iterator borrows into `buf` (non-allocating), stops at the start
+of the pixel data (so a `#` byte that happens to be a valid binary
+sample is never misread as a comment), and yields each line's text
+trimmed of surrounding ASCII whitespace. PFM (`Pf` / `PF`) and
+unrecognised inputs yield zero items.
+
 ## Encode
 
 Picks the closest binary form for the input `PixelFormat`:

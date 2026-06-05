@@ -239,6 +239,113 @@ impl Header {
     }
 }
 
+/// Iterator over `# … LF` comment lines found in the **PNM/PAM** portion
+/// of a Netpbm input (P1-P7 magics). Each item is the comment's *body*
+/// — the bytes between the leading `#` and the terminating LF —
+/// `ASCII`-trimmed at both ends.
+///
+/// Per `pbm(5)` / `pgm(5)` / `ppm(5)` / `pnm(5)` / `pam(5)`, a comment is
+/// a line whose first non-blank byte is `#`, terminated by the next LF
+/// (`0x0a`). The man pages permit comments anywhere up to the start of
+/// the pixel data for P1-P6, and anywhere within the line-based PAM
+/// header for P7 (where blank lines and comment lines may interleave
+/// the `KEY VALUE` block before the terminating `ENDHDR`). The decoder
+/// already tolerates them silently — this iterator surfaces them as a
+/// typed accessor so a caller (e.g. an image-tool that needs to round
+/// through producer metadata or a converter that wants to forward
+/// "Created by …" provenance into a different container) can read them
+/// without re-walking the header bytes.
+///
+/// The Portable FloatMap magics (`Pf` / `PF`) explicitly forbid comments
+/// in their three-line header (per the Debevec reference); this iterator
+/// yields **nothing** for a PFM input, matching the strict parser's
+/// behaviour. An input whose magic is unrecognised likewise yields
+/// nothing.
+///
+/// The iterator stops at the first byte of the pixel data — for P1-P6
+/// that is the byte after the whitespace separator that follows the
+/// `MAXVAL` (or `HEIGHT` for P1/P4) token, and for P7 that is the byte
+/// after the LF following `ENDHDR`. Body comments inside a P1/P2/P3
+/// ASCII pixel stream are *not* yielded — those are body-tokenizer
+/// concern, distinct from the header-level comment surface this
+/// accessor exposes.
+///
+/// Yielding `&[u8]` rather than `&str` matches the rest of the crate's
+/// byte-oriented API and avoids forcing the caller to accept the
+/// (rare-but-legal) case of a non-UTF-8 comment payload as an error;
+/// callers that want a string can run [`std::str::from_utf8`] themselves.
+#[derive(Debug)]
+pub struct PnmHeaderComments<'a> {
+    input: &'a [u8],
+    cursor: usize,
+    end: usize,
+}
+
+impl<'a> PnmHeaderComments<'a> {
+    /// Return a fresh iterator that yields nothing.
+    #[inline]
+    fn empty() -> Self {
+        Self {
+            input: &[],
+            cursor: 0,
+            end: 0,
+        }
+    }
+}
+
+impl<'a> Iterator for PnmHeaderComments<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.cursor < self.end {
+            let c = self.input[self.cursor];
+            if c == b'#' {
+                // Found a `#` at the start of a token. Consume it, then
+                // scan to the next LF (or `end` — a header missing its
+                // final LF still gets walked to the boundary).
+                let body_start = self.cursor + 1;
+                let mut i = body_start;
+                while i < self.end && self.input[i] != b'\n' {
+                    i += 1;
+                }
+                let raw = &self.input[body_start..i];
+                // Step past the LF terminator (if any).
+                self.cursor = if i < self.end { i + 1 } else { i };
+                return Some(trim_ascii(raw));
+            }
+            self.cursor += 1;
+        }
+        None
+    }
+}
+
+/// Iterate the `# … LF` comment lines found in the header portion of
+/// `input`, yielding each comment's text (trimmed of surrounding ASCII
+/// whitespace) as `&[u8]`. See [`PnmHeaderComments`] for the precise
+/// boundary and forbidden-magic rules.
+///
+/// This is a non-allocating accessor: the iterator borrows slices into
+/// `input` directly. An input with no recognisable header (or a PFM
+/// input) yields zero items.
+pub fn iter_pnm_header_comments(input: &[u8]) -> PnmHeaderComments<'_> {
+    let header = match parse_header(input) {
+        Ok(h) => h,
+        Err(_) => return PnmHeaderComments::empty(),
+    };
+    // PFM forbids comments by spec; never walk a PFM header looking for them.
+    if header.magic.is_pfm() {
+        return PnmHeaderComments::empty();
+    }
+    // The pixel data starts at `data_offset`; everything before that is
+    // header bytes the comment scanner is allowed to touch.
+    let end = header.data_offset.min(input.len());
+    PnmHeaderComments {
+        input,
+        cursor: 0,
+        end,
+    }
+}
+
 /// Parse a Netpbm header from the beginning of `input`. Returns the
 /// fully-populated [`Header`] including `data_offset`, the byte index of
 /// the first sample byte.
@@ -765,6 +872,82 @@ mod tests {
     fn pfm_rejects_zero_dimension() {
         let buf = b"Pf\n0 2\n-1.0\n";
         assert!(parse_header(buf).is_err());
+    }
+
+    #[test]
+    fn iter_comments_p4_yields_single_header_comment() {
+        // The same fixture as `parses_p4_header_with_comments` — the
+        // PNM header carries one `# created by GIMP` comment between
+        // the magic and the dimensions line.
+        let buf = b"P4\n# created by GIMP\n8 4\n\xFF\x00\xFF\x00";
+        let comments: Vec<&[u8]> = iter_pnm_header_comments(buf).collect();
+        assert_eq!(comments, vec![&b"created by GIMP"[..]]);
+    }
+
+    #[test]
+    fn iter_comments_p3_walks_every_header_comment() {
+        // Multiple comments interleaved with the magic / dimensions /
+        // maxval tokens. The iterator must yield them in order, trim
+        // surrounding whitespace, and stop at the start of the pixel
+        // data (so the body comment between samples is *not* yielded —
+        // it lives past `data_offset` for the ASCII case).
+        let buf = b"P3\n# first\n#  second  \n2 1 # inline tail\n255\n0 0 0 1 1 1\n";
+        let comments: Vec<&[u8]> = iter_pnm_header_comments(buf).collect();
+        // The header-region comments end at the LF following the
+        // maxval `255`; the `# inline tail` after `1` is also part of
+        // the header (it precedes the maxval token), so it is yielded.
+        assert_eq!(
+            comments,
+            vec![&b"first"[..], &b"second"[..], &b"inline tail"[..],]
+        );
+    }
+
+    #[test]
+    fn iter_comments_p7_walks_pam_block_comments() {
+        // PAM is line-based and explicitly tolerates blank lines and
+        // `# …` comment lines inside the KEY VALUE block before
+        // ENDHDR. The iterator yields each comment text trimmed.
+        let buf = b"P7\n# tool: oxideav-pbm\nWIDTH 2\n#       resolution note\nHEIGHT 1\nDEPTH 3\nMAXVAL 255\nTUPLTYPE RGB\nENDHDR\n\x00\x00\x00\x00\x00\x00";
+        let comments: Vec<&[u8]> = iter_pnm_header_comments(buf).collect();
+        assert_eq!(
+            comments,
+            vec![&b"tool: oxideav-pbm"[..], &b"resolution note"[..]]
+        );
+    }
+
+    #[test]
+    fn iter_comments_pfm_yields_nothing() {
+        // Portable FloatMap explicitly forbids comments. A well-formed
+        // PFM input has none, and (per the strict parser) one bearing
+        // a `#` in the header is rejected; the iterator surfaces the
+        // spec rule by yielding nothing for both cases.
+        let buf = b"PF\n4 3\n-1.0\n\x00\x00\x00\x00";
+        let comments: Vec<&[u8]> = iter_pnm_header_comments(buf).collect();
+        assert_eq!(comments, Vec::<&[u8]>::new());
+        // And the rejected (`#` in header) case yields nothing too,
+        // because the header parse fails and the accessor falls back
+        // to an empty iterator rather than walking a malformed input.
+        let bad = b"PF\n# comment\n4 3\n-1.0\n";
+        let comments: Vec<&[u8]> = iter_pnm_header_comments(bad).collect();
+        assert_eq!(comments, Vec::<&[u8]>::new());
+    }
+
+    #[test]
+    fn iter_comments_unrecognised_input_is_empty() {
+        // Not a Netpbm magic at all → the iterator just yields nothing.
+        let comments: Vec<&[u8]> = iter_pnm_header_comments(b"hello world").collect();
+        assert_eq!(comments, Vec::<&[u8]>::new());
+    }
+
+    #[test]
+    fn iter_comments_stops_at_pixel_data_for_binary_magic() {
+        // A P5 header followed by raw 8-bit pixel data that happens to
+        // contain a `#` byte (which is a perfectly valid sample
+        // value, 0x23). The iterator must NOT misread that as a
+        // comment — it stops at `data_offset`.
+        let buf = b"P5\n# header\n2 1\n255\n\x23\x23";
+        let comments: Vec<&[u8]> = iter_pnm_header_comments(buf).collect();
+        assert_eq!(comments, vec![&b"header"[..]]);
     }
 
     #[test]

@@ -67,7 +67,9 @@ pub use encoder::{
     PbmEncodeFormat,
 };
 pub use error::{PbmError, Result};
-pub use header::{parse_header, Header, Magic, PfmInfo, Tupltype};
+pub use header::{
+    iter_pnm_header_comments, parse_header, Header, Magic, PfmInfo, PnmHeaderComments, Tupltype,
+};
 pub use image::{PbmImage, PbmPixelFormat, PbmPlane};
 pub use pfm::{decode_pfm, encode_pfm, encode_pfm_plane, PfmHeaderInfo};
 

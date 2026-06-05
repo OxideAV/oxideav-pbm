@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round 236: typed comment-iteration accessor
+  `iter_pnm_header_comments(input: &[u8]) -> PnmHeaderComments<'_>`
+  on the header surface. The man pages (`pbm(5)` / `pgm(5)` / `ppm(5)`
+  / `pnm(5)` / `pam(5)`) permit `# … LF` comment lines anywhere in
+  the PNM/PAM header, and the decoder already tolerates them silently
+  — this accessor surfaces them as a non-allocating `Iterator<Item =
+  &[u8]>` so a caller (image-tool round-trip, container-to-container
+  metadata forwarding, "Created by …" provenance preservation) can
+  read them without re-walking the header bytes. The iterator stops at
+  the start of the pixel data (so a `#` byte that occurs as a valid
+  P5 / P6 / P7 sample is never misread as a comment) and yields each
+  comment body trimmed of surrounding ASCII whitespace. Portable
+  FloatMap inputs (`Pf` / `PF`) yield zero items by spec — the
+  Debevec reference forbids comments in the three-line PFM header.
+  Unrecognised magics also yield zero items rather than erroring, so
+  callers can treat the accessor as best-effort. New public types:
+  `PnmHeaderComments<'_>` (the iterator) and `iter_pnm_header_comments`
+  (the constructor); both are re-exported from the crate root. Adds
+  six header-level unit tests covering single-comment P4 headers,
+  multi-comment + inline-tail P3 headers, PAM-block-interleaved
+  comments under P7, the PFM forbidden-comment + valid-no-comment
+  pair, the unrecognised-magic empty path, and the
+  pixel-data-with-`#`-byte boundary stop for binary P5 — confirming
+  the iterator does not bleed past `data_offset` into pixel bytes.
+
 ### Changed
 
 - Round 229: P4 (binary PBM) encode bit packer rewritten as a per-row
