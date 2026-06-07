@@ -223,6 +223,40 @@ pub(crate) fn copy_p4_row_msb(src: &[u8], dst: &mut [u8], width: usize) {
     }
 }
 
+/// Row-level BGRA→RGBA channel shuffle for 4-byte pixels already laid
+/// out as bytes. `src` is a row of B/G/R/A bytes per pixel and `dst`
+/// receives the same pixels reordered as R/G/B/A — i.e. the first and
+/// third channel of every pixel are swapped while the second
+/// (`G`) and fourth (`A`) bytes pass through unchanged. `src.len()`
+/// and `dst.len()` must be equal and a multiple of 4.
+///
+/// The P7 `RGB_ALPHA` wire format is row-major R/G/B/A bytes per
+/// pixel, so a `Bgra` plane needs a per-pixel channel swap on the way
+/// out. The previous implementation pushed four bytes per pixel onto
+/// the output `Vec` one at a time (`out.push(px[2]); out.push(px[1]);
+/// out.push(px[0]); out.push(px[3])`), which forced a scalar pixel
+/// loop and inhibited the SIMD lowering the other 8-bit binary encode
+/// paths already enjoy (P5 / P6 / P7 RGB / P7 RGBA all walk
+/// `extend_from_slice` over a contiguous row). Walking
+/// `chunks_exact(4)` zipped with `chunks_exact_mut(4)` over a
+/// pre-resized `&mut [u8]` destination lets LLVM lower the inner four
+/// byte loads and four stores into vector lane shuffles (e.g.
+/// `TBL.16B` on aarch64, `pshufb` / `vpshufb` on x86) without any
+/// hand-rolled intrinsics. Same shape as the round-205 PFM 32-bit
+/// helper [`crate::pfm::swap_bytes_u32_row`] and the round-217 16-bit
+/// helper [`swap_bytes_u16_row`] below.
+#[inline]
+pub(crate) fn bgra_to_rgba_row(src: &[u8], dst: &mut [u8]) {
+    debug_assert_eq!(src.len(), dst.len());
+    debug_assert_eq!(src.len() % 4, 0);
+    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+        d[0] = s[2]; // R ← B-position byte
+        d[1] = s[1]; // G stays
+        d[2] = s[0]; // B ← R-position byte
+        d[3] = s[3]; // A stays
+    }
+}
+
 /// Row-level byte-swap for 2-byte samples already laid out as bytes.
 /// `src` is read as little-endian `u16` samples and `dst` receives the
 /// same samples big-endian (or vice versa — the swap is its own
@@ -430,5 +464,69 @@ mod tests {
             d.copy_from_slice(&v);
         }
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn bgra_to_rgba_row_swaps_first_and_third_byte_per_pixel() {
+        // Four BGRA pixels chosen so the channel positions are all
+        // distinguishable from each other (B ≠ G ≠ R ≠ A). The output
+        // must have R/G/B/A order, i.e. byte 0 ↔ byte 2 within every
+        // 4-byte pixel and bytes 1 / 3 unchanged.
+        let src: [u8; 16] = [
+            0xb1, 0x91, 0xa1, 0xc1, // pixel 0: B=b1 G=91 R=a1 A=c1
+            0xb2, 0x92, 0xa2, 0xc2, // pixel 1
+            0xb3, 0x93, 0xa3, 0xc3, // pixel 2
+            0xb4, 0x94, 0xa4, 0xc4, // pixel 3
+        ];
+        let mut dst = [0u8; 16];
+        bgra_to_rgba_row(&src, &mut dst);
+        assert_eq!(
+            dst,
+            [
+                0xa1, 0x91, 0xb1, 0xc1, // pixel 0: R G B A
+                0xa2, 0x92, 0xb2, 0xc2, // pixel 1
+                0xa3, 0x93, 0xb3, 0xc3, // pixel 2
+                0xa4, 0x94, 0xb4, 0xc4, // pixel 3
+            ]
+        );
+    }
+
+    #[test]
+    fn bgra_to_rgba_row_is_self_inverse() {
+        // Applying the shuffle twice must reconstruct the original
+        // byte sequence, because swap(B, R) is involutive and the G/A
+        // channels are pass-through. Guards against any accidental
+        // index slip in the inner index map.
+        let src: [u8; 12] = [
+            0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xa0, 0xb0, 0xc0,
+        ];
+        let mut once = [0u8; 12];
+        bgra_to_rgba_row(&src, &mut once);
+        let mut twice = [0u8; 12];
+        bgra_to_rgba_row(&once, &mut twice);
+        assert_eq!(twice, src);
+    }
+
+    #[test]
+    fn bgra_to_rgba_row_matches_per_pixel_push_reference() {
+        // Byte-for-byte agreement with the per-pixel `out.push(px[2])
+        // / push(px[1]) / push(px[0]) / push(px[3])` reference path
+        // the pre-r253 `encode_p7_bgra8` body used. Drives the kernel
+        // with a deterministic 32-pixel input so every (pixel mod 8)
+        // alignment case is exercised at least once.
+        let mut src = vec![0u8; 32 * 4];
+        for (i, byte) in src.iter_mut().enumerate() {
+            *byte = ((i.wrapping_mul(37) ^ 0xa5) & 0xff) as u8;
+        }
+        let mut fast = vec![0u8; src.len()];
+        bgra_to_rgba_row(&src, &mut fast);
+        let mut expected: Vec<u8> = Vec::with_capacity(src.len());
+        for px in src.chunks_exact(4) {
+            expected.push(px[2]);
+            expected.push(px[1]);
+            expected.push(px[0]);
+            expected.push(px[3]);
+        }
+        assert_eq!(fast, expected);
     }
 }

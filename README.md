@@ -166,7 +166,22 @@ future optimisation rounds can A/B-compare SIMD byte-swap (P5/P6
 ASCII writers (P2/P3) against a stable baseline. Indicative
 apple-silicon numbers on the binary path: ~49 GiB/s P6 8-bit
 decode, ~50 GiB/s P7 16-bit RGBA decode, ~26 GiB/s P7 8-bit
-GRAYSCALE_ALPHA encode. Round 250 closed the last decode bottleneck the
+GRAYSCALE_ALPHA encode. Round 253 closed the last 8-bit binary
+encode bottleneck — the `Bgra`→P7 `RGB_ALPHA` per-pixel channel
+swap (B ↔ R, with G and A passing through) was the lone path still
+walking a per-byte `out.push(px[2]); out.push(px[1]); out.push(px[0]);
+out.push(px[3])` loop, while every other 8-bit binary encoder
+(P5 / P6 / P7 RGB / P7 RGBA / P7 GRAYSCALE_ALPHA) ran
+`extend_from_slice` over a contiguous row. A new
+`binary::bgra_to_rgba_row` helper now walks `chunks_exact(4)` zipped
+with `chunks_exact_mut(4)` over a pre-resized `&mut [u8]` destination
+so LLVM can lower the four-byte permutation to a vector lane shuffle
+(`TBL.16B` on aarch64; `pshufb` / `vpshufb` on x86). Apple-silicon
+at 320×240: encode `Bgra` ~157 µs → ~7.1 µs (≈ 22× faster,
+~40 GiB/s up from ~1.8 GiB/s). The Netpbm wire still declares
+`TUPLTYPE RGB_ALPHA` (the format has no `BGR_ALPHA` magic) so files
+round-trip through `Rgba` on decode unchanged; the new bench is
+`encode_p7_bgra_320x240`. Round 250 closed the last decode bottleneck the
 r248 P4 fast path left behind: binary `P5` / `P6` / `P7` 8-bit decode at
 `maxval=255` and 16-bit decode at `maxval=65535` (with one of the
 standard `GRAYSCALE` / `GRAYSCALE_ALPHA` / `RGB` / `RGB_ALPHA`

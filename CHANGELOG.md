@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Round 253: P7 `RGB_ALPHA` 8-bit encode from a `Bgra` source plane
+  rewritten as a per-row channel shuffle through a dedicated
+  `binary::bgra_to_rgba_row` helper. The P7 `RGB_ALPHA` wire format is
+  row-major R/G/B/A bytes per pixel, so a `Bgra` plane needs only a
+  per-pixel swap of the first and third channel (B ↔ R, with G and A
+  passing through) on the way out. The pre-r253 path pushed four bytes
+  per pixel onto the output `Vec` one at a time (`out.push(px[2]);
+  out.push(px[1]); out.push(px[0]); out.push(px[3])`), forcing a
+  scalar pixel loop while every other 8-bit binary encode path
+  (P5 / P6 / P7 RGB / P7 RGBA / P7 GRAYSCALE_ALPHA) already ran
+  `extend_from_slice` over a contiguous row. The new helper walks
+  `chunks_exact(4)` zipped with `chunks_exact_mut(4)` over a
+  pre-resized `&mut [u8]` destination, letting LLVM lower the inner
+  four-byte permutation to a vector lane shuffle (`TBL.16B` on
+  aarch64; `pshufb` / `vpshufb` on x86) without any hand-rolled
+  intrinsics. Mirrors the round-217 `swap_bytes_u16_row` and round-229
+  `copy_p4_row_msb` refactors. Apple-silicon at 320×240: encode
+  `Bgra` 157 µs → ~7.1 µs (≈ 22× faster, ~40 GiB/s up from
+  ~1.8 GiB/s). The header still declares `TUPLTYPE RGB_ALPHA` —
+  Netpbm has no `BGR_ALPHA` on the wire — so on-disk files round-trip
+  through `Rgba` on decode. Adds three helper-level unit tests
+  (positional swap kernel, self-inverse property, byte-for-byte
+  agreement with the per-pixel `out.push` reference path over a
+  deterministic 32-pixel input covering every (pixel mod 8)
+  alignment case) plus three encoder-level regressions
+  (`encode_p7_bgra_swaps_to_rgb_alpha_body` for the wire-byte
+  contract, `encode_p7_bgra_matches_canonical_rgba_after_swap` for
+  byte-for-byte agreement with a pre-swapped `Rgba` plane, and
+  `encode_p7_bgra_strided_plane_matches_unstrided` for the
+  stride-tolerance contract). A dedicated `encode_p7_bgra_320x240`
+  criterion bench joins the existing P7 `RGB_ALPHA` 8-bit and 16-bit
+  benches so future SIMD passes can A/B-compare against this
+  baseline.
+
 - Round 250: Binary `P5` / `P6` / `P7` decode now dispatches a per-row
   byte-stream fast path when the wire sample layout is byte-for-byte
   identical to the destination plane (after at most a row-level u16

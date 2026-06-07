@@ -20,6 +20,12 @@
 //!   - **encode_p6_rgb48_320x240**: 320×240 binary PPM 16-bit.
 //!   - **encode_p7_rgba_320x240**: 320×240 PAM `RGB_ALPHA` 8-bit.
 //!   - **encode_p7_rgba64_320x240**: 320×240 PAM `RGB_ALPHA` 16-bit.
+//!   - **encode_p7_bgra_320x240**: 320×240 PAM `RGB_ALPHA` 8-bit fed
+//!     a `Bgra` source plane — exercises the per-pixel BGRA→RGBA
+//!     channel shuffle. Round 253 routed this path through the
+//!     row-level `bgra_to_rgba_row` helper so the SIMD lowering is
+//!     measurable against the round-176-era per-byte `Vec::push`
+//!     baseline.
 //!   - **encode_p7_gray16_320x240**: 320×240 PAM `GRAYSCALE` 16-bit —
 //!     the 1-channel LE→BE swap path on `Gray16Le` (only reachable via
 //!     the explicit `Pam7` selector; default routing for `Gray16Le`
@@ -193,6 +199,23 @@ fn bench_encode_p7_rgba64_320x240(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_encode_p7_bgra_320x240(c: &mut Criterion) {
+    // P7 RGB_ALPHA 8-bit fed a `Bgra` plane — the lone remaining
+    // 8-bit binary encode path that needs a per-pixel channel
+    // shuffle on the way out (B ↔ R, G + A pass-through). The
+    // round-253 refactor moved the body from a per-byte
+    // `Vec::push` loop to the row-level `bgra_to_rgba_row` helper;
+    // this bench makes the speedup measurable against a
+    // pre-r253 baseline.
+    let image = build_filled(320, 240, PbmPixelFormat::Bgra, 0x6666_8888);
+    let mut g = c.benchmark_group("encode_p7_bgra_320x240");
+    g.throughput(Throughput::Bytes((320 * 240 * 4) as u64));
+    g.bench_function(BenchmarkId::from_parameter("p7/bgra/320x240"), |b| {
+        b.iter(|| encode_pbm(criterion::black_box(&image)).expect("encode_pbm"));
+    });
+    g.finish();
+}
+
 fn bench_encode_p7_gray16_320x240(c: &mut Criterion) {
     // P7 GRAYSCALE 16-bit — single-channel LE→BE swap reached via the
     // explicit `Pam7` selector with `Gray16Le`. Round 222 routed this
@@ -310,6 +333,7 @@ criterion_group!(
     bench_encode_p6_rgb48_320x240,
     bench_encode_p7_rgba_320x240,
     bench_encode_p7_rgba64_320x240,
+    bench_encode_p7_bgra_320x240,
     bench_encode_p7_gray16_320x240,
     bench_encode_p7_ya8_320x240,
     bench_encode_p1_mono_320x240,

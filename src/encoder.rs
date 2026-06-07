@@ -27,7 +27,7 @@
 use crate::error::{PbmError as Error, Result};
 
 use crate::ascii::{encode_ascii_body_bits, encode_ascii_body_u8};
-use crate::binary::{copy_p4_row_msb, swap_bytes_u16_row};
+use crate::binary::{bgra_to_rgba_row, copy_p4_row_msb, swap_bytes_u16_row};
 use crate::image::{PbmImage, PbmPixelFormat, PbmPlane};
 
 #[cfg(feature = "registry")]
@@ -512,16 +512,26 @@ fn encode_p7_rgba8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
 
 fn encode_p7_bgra8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     // Reorder BGRA → RGBA on the way out so the file declares RGB_ALPHA
-    // and any decoder reads them back as such.
+    // and any decoder reads them back as such. The per-row channel
+    // shuffle is handled by `binary::bgra_to_rgba_row`, which walks
+    // `chunks_exact(4)` zipped with `chunks_exact_mut(4)` over a
+    // pre-resized `&mut [u8]` destination so LLVM can lower the inner
+    // four-byte permutation to a vector lane shuffle (`TBL.16B` on
+    // aarch64, `pshufb` / `vpshufb` on x86). Same shape as the
+    // round-217 `swap_bytes_u16_row` and round-229 `copy_p4_row_msb`
+    // helpers; closes the symmetry gap that left this path on the
+    // per-pixel `out.push(px[2]); out.push(px[1]); …` pattern while
+    // the other 8-bit binary encoders (P5 / P6 / P7 RGB / P7 RGBA /
+    // P7 GRAYSCALE_ALPHA) all run `extend_from_slice` over a
+    // contiguous row.
+    let row_bytes = w * 4;
     let mut out = header_pam(w, h, 4, 255, "RGB_ALPHA");
+    let body_start = out.len();
+    out.resize(body_start + row_bytes * h, 0);
     for y in 0..h {
-        let row = &plane.data[y * plane.stride..y * plane.stride + w * 4];
-        for px in row.chunks_exact(4) {
-            out.push(px[2]);
-            out.push(px[1]);
-            out.push(px[0]);
-            out.push(px[3]);
-        }
+        let src = &plane.data[y * plane.stride..y * plane.stride + row_bytes];
+        let dst = &mut out[body_start + y * row_bytes..body_start + (y + 1) * row_bytes];
+        bgra_to_rgba_row(src, dst);
     }
     Ok(out)
 }
@@ -831,5 +841,103 @@ mod tests {
         assert!(s.contains("DEPTH 1"));
         assert!(s.contains("TUPLTYPE GRAYSCALE"));
         assert!(s.contains("MAXVAL 65535"));
+    }
+
+    #[test]
+    fn encode_p7_bgra_swaps_to_rgb_alpha_body() {
+        // BGRA in / RGB_ALPHA out: the on-disk byte sequence must be
+        // R/G/B/A per pixel even though the input plane is laid out
+        // B/G/R/A. Regression for the round-253 `bgra_to_rgba_row`
+        // refactor — the inner per-pixel channel shuffle moved from a
+        // per-byte `Vec::push` loop to a row-level
+        // `chunks_exact(4)` zip, so this guards against any
+        // accidental index slip.
+        let img = make_image(
+            PbmPixelFormat::Bgra,
+            2,
+            1,
+            8,
+            // Two BGRA pixels: (B=0x10,G=0x20,R=0x30,A=0x40) +
+            // (B=0xAB,G=0xCD,R=0xEF,A=0x12).
+            vec![0x10, 0x20, 0x30, 0x40, 0xab, 0xcd, 0xef, 0x12],
+        );
+        let bytes = encode_pbm(&img).unwrap();
+        let body = &bytes[bytes.len() - 8..];
+        // R/G/B/A on disk: pixel 0 = (0x30, 0x20, 0x10, 0x40);
+        // pixel 1 = (0xef, 0xcd, 0xab, 0x12).
+        assert_eq!(body, &[0x30, 0x20, 0x10, 0x40, 0xef, 0xcd, 0xab, 0x12]);
+        // The PAM header must declare DEPTH 4 + RGB_ALPHA + MAXVAL
+        // 255, not the input's BGRA layout — the on-disk file is
+        // never tagged BGRA.
+        let hdr_end = bytes.len() - 8;
+        let s = std::str::from_utf8(&bytes[..hdr_end]).unwrap();
+        assert!(s.contains("DEPTH 4"));
+        assert!(s.contains("TUPLTYPE RGB_ALPHA"));
+        assert!(s.contains("MAXVAL 255"));
+    }
+
+    #[test]
+    fn encode_p7_bgra_matches_canonical_rgba_after_swap() {
+        // A BGRA plane and an Rgba plane that holds the same pixels
+        // with channels pre-swapped must produce byte-for-byte
+        // identical Netpbm output (same RGB_ALPHA header + same body).
+        // Doubles as a regression that the helper does not also touch
+        // the G or A channels.
+        let bgra = make_image(
+            PbmPixelFormat::Bgra,
+            3,
+            2,
+            12,
+            vec![
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+                0x0c, // row 0
+                0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                0x18, // row 1
+            ],
+        );
+        let rgba = make_image(
+            PbmPixelFormat::Rgba,
+            3,
+            2,
+            12,
+            // Same pixels with channels pre-swapped: (R, G, B, A)
+            // per pixel where the BGRA source had (B, G, R, A).
+            vec![
+                0x03, 0x02, 0x01, 0x04, 0x07, 0x06, 0x05, 0x08, 0x0b, 0x0a, 0x09, 0x0c, 0x0f, 0x0e,
+                0x0d, 0x10, 0x13, 0x12, 0x11, 0x14, 0x17, 0x16, 0x15, 0x18,
+            ],
+        );
+        assert_eq!(encode_pbm(&bgra).unwrap(), encode_pbm(&rgba).unwrap());
+    }
+
+    #[test]
+    fn encode_p7_bgra_strided_plane_matches_unstrided() {
+        // `plane.stride` may exceed `width * 4` when the caller's
+        // buffer has trailing row padding. The encoder must walk
+        // exactly `width * 4` bytes per row and ignore the stride
+        // padding. Mirrors `encode_p4_strided_plane_matches_unstrided`
+        // for the BGRA path so the row-level helper plus the stride
+        // arithmetic stay in step.
+        let tight = make_image(
+            PbmPixelFormat::Bgra,
+            2,
+            2,
+            8,
+            vec![
+                0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, // row 0
+                0x11, 0x21, 0x31, 0x41, 0x51, 0x61, 0x71, 0x81, // row 1
+            ],
+        );
+        let padded = make_image(
+            PbmPixelFormat::Bgra,
+            2,
+            2,
+            12, // stride = 12 bytes per row (8 used + 4 padding)
+            vec![
+                0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0xff, 0xff, 0xff, 0xff, 0x11, 0x21,
+                0x31, 0x41, 0x51, 0x61, 0x71, 0x81, 0xee, 0xee, 0xee, 0xee,
+            ],
+        );
+        assert_eq!(encode_pbm(&tight).unwrap(), encode_pbm(&padded).unwrap());
     }
 }
