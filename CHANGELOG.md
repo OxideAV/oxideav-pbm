@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Round 250: Binary `P5` / `P6` / `P7` decode now dispatches a per-row
+  byte-stream fast path when the wire sample layout is byte-for-byte
+  identical to the destination plane (after at most a row-level u16
+  LE↔BE swap). Eligible cases — `P5` 8-bit (`Gray8`), `P6` 8-bit
+  (`Rgb24`), `P7` `GRAYSCALE` / `GRAYSCALE_ALPHA` / `RGB` / `RGB_ALPHA`
+  at maxval 255 (`Gray8` / `Ya8` / `Rgb24` / `Rgba`); plus their 16-bit
+  siblings at maxval 65535 (`Gray16Le`, `Rgb48Le`, `Rgba64Le`) — used
+  to widen each wire byte into a `Vec<u16>` (`decode_binary`) and then
+  run a per-sample `scale_to_*` / `to_le_bytes` loop in
+  `samples_to_plane` even though both transforms collapse to identity
+  (8-bit) or a single byte swap (16-bit). The new
+  `try_decode_binary_bytewise` helper in `src/decoder.rs` runs upfront
+  body-length validation (so a multi-billion-dimension header cannot
+  OOM the destination allocation), then either does a single
+  `data.copy_from_slice(&body[..total])` (8-bit) or walks rows through
+  the existing round-217 `swap_bytes_u16_row` helper (16-bit) straight
+  into the destination plane. PAM combinations involving channel
+  re-arrangement (`BLACKANDWHITE` bit-pack, `BLACKANDWHITE_ALPHA`
+  G→RGBA expansion, 16-bit `GRAYSCALE_ALPHA` widened to RGBA because
+  the catalogue has no `Ya16`) and any non-natural maxval still fall
+  through to the generic widen-then-rescale path unchanged. Mirrors
+  the round-229 / round-248 P4 encode and decode memcpy rewrites and
+  the round-217 16-bit encode-side row-helper refactor.
+  Apple-silicon numbers:
+  - decode `P5` 8-bit 640×480 ~6.1 µs (~48 GiB/s; was ~1.7 GiB/s
+    headline → ≈28× faster)
+  - decode `P5` 16-bit 640×480 ~11.6 µs (~45 GiB/s)
+  - decode `P6` 8-bit 640×480 ~16.5 µs (~49 GiB/s; was ~1.7 GiB/s
+    headline → ≈29× faster)
+  - decode `P6` 16-bit 320×240 ~9.3 µs (~47 GiB/s)
+  - decode `P7` `RGB_ALPHA` 8-bit 320×240 ~6.1 µs (~48 GiB/s)
+  - decode `P7` `RGB_ALPHA` 16-bit 320×240 ~11.4 µs (~50 GiB/s; was
+    ~6.9 GiB/s headline → ≈7.3× faster)
+  Adds ten decoder-level unit tests covering the 8-bit
+  identity-memcpy case for P5 / P6 / P7 (`RGB_ALPHA` and
+  `GRAYSCALE_ALPHA`), the 16-bit row-swap case for P5 / P6 / P7
+  `RGB_ALPHA`, the fall-through cases (non-natural maxval, 16-bit
+  `GRAYSCALE_ALPHA` channel widen, `BLACKANDWHITE_ALPHA`), and the
+  truncated-body and overflow-dimension rejection paths.
+
 - Round 248: P4 (binary PBM) decode → `MonoBlack` rewritten as a per-row
   memcpy. The Netpbm wire format for P4 (1 bit per pixel, MSB-first
   packed, rows padded to a byte boundary, `1 = black` per `pbm(5)`) is

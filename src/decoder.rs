@@ -26,7 +26,7 @@
 use crate::error::{PbmError as Error, Result};
 
 use crate::ascii::decode_ascii;
-use crate::binary::{copy_p4_row_msb, decode_binary, DecodedSamples};
+use crate::binary::{copy_p4_row_msb, decode_binary, swap_bytes_u16_row, DecodedSamples};
 use crate::header::{parse_header, Header, Magic, Tupltype};
 use crate::image::{PbmImage, PbmPixelFormat, PbmPlane};
 
@@ -119,6 +119,20 @@ pub fn decode_pbm(input: &[u8]) -> Result<(PbmImage, PbmPixelFormat)> {
     if matches!(header.magic, Magic::P4BinaryBitmap) {
         return decode_p4_monoblack(&header, body);
     }
+    // Binary 8-bit (maxval=255) and 16-bit (maxval=65535) hot path. When
+    // the wire sample layout matches the plane byte layout — P5 / P6 /
+    // P7 (`GRAYSCALE` / `GRAYSCALE_ALPHA` / `RGB` / `RGB_ALPHA`, plus
+    // custom-tupltype routed through depth) at the natural maxval — the
+    // body is either a per-row `copy_from_slice` (8-bit) or a per-row
+    // `swap_bytes_u16_row` (16-bit) straight into the destination plane.
+    // This skips both the intermediate `Vec<u16>` widen pass in
+    // `decode_binary` and the per-sample `scale_to_*` /
+    // `to_le_bytes` loop in `samples_to_plane`. Symmetric with the
+    // round-229 `encode_p4` and round-248 `decode_p4_monoblack`
+    // memcpy rewrites.
+    if let Some(out) = try_decode_binary_bytewise(&header, body)? {
+        return Ok(out);
+    }
     let samples = if header.magic.is_ascii() {
         decode_ascii(&header, body)?
     } else {
@@ -178,6 +192,122 @@ fn decode_p4_monoblack(header: &Header, body: &[u8]) -> Result<(PbmImage, PbmPix
         },
         PbmPixelFormat::MonoBlack,
     ))
+}
+
+/// Binary `P5` / `P6` / `P7` decode fast path for the cases where the
+/// on-disk sample layout is byte-for-byte identical to the destination
+/// plane (after at most a row-level 16-bit LE→BE byte swap). Returns
+/// `Some(decoded)` for the eligible cases, `None` so the caller falls
+/// back to the generic widen-then-rescale path.
+///
+/// Eligible when:
+///
+/// * Magic is `P5` / `P6` / `P7` (binary, non-bit).
+/// * `maxval == 255` (8-bit, no scaling) or `maxval == 65535`
+///   (16-bit, no scaling — just LE↔BE byte order).
+/// * Depth × bytes-per-sample lines up with the destination plane's
+///   bytes-per-pixel for the picked [`PbmPixelFormat`] — so the wire
+///   is a flat row-major byte stream the plane can receive directly.
+///
+/// For PAM, `pick_pixel_format` already handles standard tupltypes
+/// (`GRAYSCALE` / `GRAYSCALE_ALPHA` / `RGB` / `RGB_ALPHA`) and the
+/// depth-routed `Custom` / no-tupltype cases. Tupltypes that involve a
+/// channel re-arrangement (`BLACKANDWHITE` → bit pack,
+/// `BLACKANDWHITE_ALPHA` → expand to RGBA, 16-bit `GRAYSCALE_ALPHA` →
+/// widen to RGBA) fall through to the generic path because their wire
+/// bytes do not line up with the plane bytes.
+fn try_decode_binary_bytewise(
+    header: &Header,
+    body: &[u8],
+) -> Result<Option<(PbmImage, PbmPixelFormat)>> {
+    // Only the three binary magics with row-major scalar samples are
+    // eligible. P4 has its own fast path; P1/P2/P3 are ASCII; PFM is
+    // handled before we ever reach here.
+    if !matches!(
+        header.magic,
+        Magic::P5BinaryGraymap | Magic::P6BinaryPixmap | Magic::P7Pam
+    ) {
+        return Ok(None);
+    }
+    // Only the natural maxvals — 255 for 8-bit, 65535 for 16-bit —
+    // skip the per-sample scaling path. Anything else (e.g. PGM with
+    // maxval=200) must go through `scale_to_u8` / `scale_to_u16`.
+    let bytes_per_sample = match header.maxval {
+        255 => 1usize,
+        65535 => 2usize,
+        _ => return Ok(None),
+    };
+
+    let format = pick_pixel_format(header)?;
+    // The set of (format, depth, bytes_per_sample) tuples where the
+    // wire stream is byte-for-byte identical to the destination plane
+    // (8-bit) or related only by a row-level u16 byte swap (16-bit).
+    //
+    // PAM combinations that re-arrange channels are excluded even when
+    // their wire byte count happens to coincide with the plane's: e.g.
+    // 16-bit `GRAYSCALE_ALPHA` widens 2 wire channels (G, A) into a
+    // 4-channel RGBA plane (G, G, G, A) because the catalogue has no
+    // `Ya16` variant — depth × bps == bpp but the byte mapping is not
+    // an identity. The generic path's `fill_rgba_u8`-style channel
+    // expander handles those cases unchanged.
+    let depth = header.depth as usize;
+    let bytes_per_pixel: usize = match (format, depth, bytes_per_sample) {
+        (PbmPixelFormat::Gray8, 1, 1) => 1,
+        (PbmPixelFormat::Ya8, 2, 1) => 2,
+        (PbmPixelFormat::Gray16Le, 1, 2) => 2,
+        (PbmPixelFormat::Rgb24, 3, 1) => 3,
+        (PbmPixelFormat::Rgba, 4, 1) => 4,
+        (PbmPixelFormat::Rgb48Le, 3, 2) => 6,
+        (PbmPixelFormat::Rgba64Le, 4, 2) => 8,
+        _ => return Ok(None),
+    };
+
+    let w = header.width as usize;
+    let h = header.height as usize;
+    if w == 0 || h == 0 {
+        return Err(Error::invalid("Netpbm: zero dimension"));
+    }
+    let stride = w
+        .checked_mul(bytes_per_pixel)
+        .ok_or_else(|| Error::invalid("Netpbm: stride overflow"))?;
+    let total = stride
+        .checked_mul(h)
+        .ok_or_else(|| Error::invalid("Netpbm: plane-size overflow"))?;
+    if body.len() < total {
+        return Err(Error::invalid("Netpbm: pixel data truncated"));
+    }
+
+    let mut data = vec![0u8; total];
+    if bytes_per_sample == 1 {
+        // 8-bit fast path: wire bytes are already the plane bytes
+        // (samples are uint8 and the plane format matches the depth).
+        // A single `copy_from_slice` lowers to `memcpy` on every
+        // target — no per-row loop needed.
+        data.copy_from_slice(&body[..total]);
+    } else {
+        // 16-bit fast path: wire is big-endian, plane is little-endian.
+        // The row-level `swap_bytes_u16_row` helper lowers the inner
+        // load / byte-swap / store sequence to a vector byte-swap lane
+        // (`REV16.16B` on aarch64; `pshufb` / `vpshufb` on x86) —
+        // same shape as the round-205 PFM 32-bit helper and the
+        // round-217 encode-side helper of the same name.
+        for y in 0..h {
+            let off = y * stride;
+            let src = &body[off..off + stride];
+            let dst = &mut data[off..off + stride];
+            swap_bytes_u16_row(src, dst);
+        }
+    }
+    Ok(Some((
+        PbmImage {
+            width: header.width,
+            height: header.height,
+            pixel_format: format,
+            planes: vec![PbmPlane { stride, data }],
+            pts: None,
+        },
+        format,
+    )))
 }
 
 /// Build a `(PbmPlane, PbmPixelFormat)` from a freshly-decoded sample
@@ -645,6 +775,254 @@ mod tests {
         // multiplication overflows usize on 32-bit and easily exceeds
         // body.len() on 64-bit. Must fail before `vec![0u8; need]`.
         let buf = b"P4\n8 200888808\n\x00\x00\x00\x00";
+        let err = decode_pbm(buf).unwrap_err();
+        match err {
+            crate::error::PbmError::InvalidData(_) => {}
+            other => panic!("expected InvalidData, got {other:?}"),
+        }
+    }
+
+    /// Pseudorandom but deterministic byte fill — produces enough
+    /// variation that any indexing slip in the fast path would show up
+    /// as a mismatch against the generic path.
+    fn fill_xorshift(buf: &mut [u8], seed: u32) {
+        let mut state = seed | 1;
+        for b in buf.iter_mut() {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *b = (state & 0xff) as u8;
+        }
+    }
+
+    /// Round-trip the bytewise-decode hot path against a synthetic file
+    /// whose body bytes are known up front, asserting the decoded plane
+    /// data is bit-identical to those wire bytes (8-bit case) or to the
+    /// LE byte-swap of them (16-bit case).
+    #[test]
+    fn decode_bytewise_p5_gray8_is_pure_memcpy() {
+        // 7×3 gray image so width is not a power of two — stride =
+        // bytes_per_pixel * w with no padding for `Gray8`.
+        let mut body = vec![0u8; 7 * 3];
+        fill_xorshift(&mut body, 0x1234_5678);
+        let mut buf = Vec::from(b"P5\n7 3\n255\n".as_slice());
+        buf.extend_from_slice(&body);
+        let (image, fmt) = decode_pbm(&buf).unwrap();
+        assert_eq!(fmt, PbmPixelFormat::Gray8);
+        assert_eq!(image.planes[0].stride, 7);
+        assert_eq!(image.planes[0].data, body);
+    }
+
+    #[test]
+    fn decode_bytewise_p6_rgb24_is_pure_memcpy() {
+        let mut body = vec![0u8; 5 * 4 * 3];
+        fill_xorshift(&mut body, 0x2345_6789);
+        let mut buf = Vec::from(b"P6\n5 4\n255\n".as_slice());
+        buf.extend_from_slice(&body);
+        let (image, fmt) = decode_pbm(&buf).unwrap();
+        assert_eq!(fmt, PbmPixelFormat::Rgb24);
+        assert_eq!(image.planes[0].stride, 15);
+        assert_eq!(image.planes[0].data, body);
+    }
+
+    #[test]
+    fn decode_bytewise_p7_rgba_is_pure_memcpy() {
+        let mut body = vec![0u8; 3 * 2 * 4];
+        fill_xorshift(&mut body, 0x3456_789a);
+        let mut buf = Vec::from(
+            b"P7\nWIDTH 3\nHEIGHT 2\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n".as_slice(),
+        );
+        buf.extend_from_slice(&body);
+        let (image, fmt) = decode_pbm(&buf).unwrap();
+        assert_eq!(fmt, PbmPixelFormat::Rgba);
+        assert_eq!(image.planes[0].stride, 12);
+        assert_eq!(image.planes[0].data, body);
+    }
+
+    #[test]
+    fn decode_bytewise_p7_ya8_is_pure_memcpy() {
+        let mut body = vec![0u8; 4 * 3 * 2];
+        fill_xorshift(&mut body, 0x4567_89ab);
+        let mut buf = Vec::from(
+            b"P7\nWIDTH 4\nHEIGHT 3\nDEPTH 2\nMAXVAL 255\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n"
+                .as_slice(),
+        );
+        buf.extend_from_slice(&body);
+        let (image, fmt) = decode_pbm(&buf).unwrap();
+        assert_eq!(fmt, PbmPixelFormat::Ya8);
+        assert_eq!(image.planes[0].stride, 8);
+        assert_eq!(image.planes[0].data, body);
+    }
+
+    #[test]
+    fn decode_bytewise_p5_gray16_swaps_to_le_plane() {
+        // Two BE samples on the wire — the plane gets them in LE.
+        // 0x1234 BE = [0x12, 0x34] wire → [0x34, 0x12] plane.
+        let mut buf = Vec::from(b"P5\n2 1\n65535\n".as_slice());
+        buf.extend_from_slice(&[0x12, 0x34, 0xab, 0xcd]);
+        let (image, fmt) = decode_pbm(&buf).unwrap();
+        assert_eq!(fmt, PbmPixelFormat::Gray16Le);
+        assert_eq!(image.planes[0].stride, 4);
+        assert_eq!(image.planes[0].data, [0x34, 0x12, 0xcd, 0xab]);
+    }
+
+    #[test]
+    fn decode_bytewise_falls_through_for_non_natural_maxval() {
+        // maxval=200 forces per-sample scaling; the fast path must
+        // decline and the generic `scale_to_u8` path must take over.
+        // 100 / 200 ≈ 0.5 → round-half-up → 128.
+        let mut buf = Vec::from(b"P5\n2 1\n200\n".as_slice());
+        buf.extend_from_slice(&[100, 200]);
+        let (image, fmt) = decode_pbm(&buf).unwrap();
+        assert_eq!(fmt, PbmPixelFormat::Gray8);
+        assert_eq!(image.planes[0].data, [128, 255]);
+    }
+
+    #[test]
+    fn decode_bytewise_falls_through_for_p7_grayscale_alpha_16bit() {
+        // 16-bit `GRAYSCALE_ALPHA` widens 2 wire channels (G, A) to a
+        // 4-channel RGBA plane (G, G, G, A). The fast path's
+        // (format, depth, bps) gate excludes this case so the generic
+        // expander runs.
+        let mut buf = Vec::from(
+            b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n"
+                .as_slice(),
+        );
+        // G=0x1234, A=0xABCD — wire is BE.
+        buf.extend_from_slice(&[0x12, 0x34, 0xAB, 0xCD]);
+        let (image, fmt) = decode_pbm(&buf).unwrap();
+        assert_eq!(fmt, PbmPixelFormat::Rgba);
+        // After 16→8 scaling: G→0x12 (high byte), A→0xAB. Plane is
+        // (G, G, G, A) per the GrayscaleAlpha layout.
+        assert_eq!(image.planes[0].data, [0x12, 0x12, 0x12, 0xAB]);
+    }
+
+    #[test]
+    fn decode_bytewise_falls_through_for_p7_blackandwhite_alpha() {
+        // BLACKANDWHITE_ALPHA is depth=2 with 1-bit semantics on the
+        // first channel — the plane expansion to RGBA cannot use a
+        // raw byte copy. Fast path declines; generic path runs.
+        let mut buf = Vec::from(
+            b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 2\nMAXVAL 1\nTUPLTYPE BLACKANDWHITE_ALPHA\nENDHDR\n"
+                .as_slice(),
+        );
+        buf.extend_from_slice(&[1, 1]);
+        let (image, fmt) = decode_pbm(&buf).unwrap();
+        assert_eq!(fmt, PbmPixelFormat::Rgba);
+        // Sample 1 with maxval=1 expands to 0xFF on every channel.
+        assert_eq!(image.planes[0].data, [0xFF, 0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn decode_bytewise_matches_legacy_for_every_8bit_magic() {
+        // For each magic where the fast path is eligible, the decoded
+        // plane must be byte-equivalent to a reference plane built
+        // from the same wire bytes via the same byte layout — the wire
+        // bytes ARE the plane bytes when maxval=255 and the wire
+        // channel count matches the plane bytes-per-pixel.
+        let configs: &[(&[u8], usize, &str, usize)] = &[
+            // (header, body_size_per_pixel, label, depth)
+            (b"P5\n8 4\n255\n", 1, "P5/8x4 gray8", 1),
+            (b"P6\n8 4\n255\n", 3, "P6/8x4 rgb24", 3),
+        ];
+        for (header_prefix, bpp, label, _depth) in configs {
+            let mut body = vec![0u8; 8 * 4 * bpp];
+            fill_xorshift(&mut body, 0xdead_beef);
+            let mut buf = Vec::from(*header_prefix);
+            buf.extend_from_slice(&body);
+            let (image, _fmt) = decode_pbm(&buf).unwrap();
+            assert_eq!(image.planes[0].stride, 8 * bpp, "{label}");
+            assert_eq!(image.planes[0].data, body, "{label}");
+        }
+        // P7 variants — wire channels match plane bytes-per-pixel.
+        for (depth, tupltype, label) in [
+            (1usize, "GRAYSCALE", "P7/3x2 grayscale"),
+            (2, "GRAYSCALE_ALPHA", "P7/3x2 ya8"),
+            (3, "RGB", "P7/3x2 rgb24"),
+            (4, "RGB_ALPHA", "P7/3x2 rgba"),
+        ] {
+            let mut body = vec![0u8; 3 * 2 * depth];
+            fill_xorshift(&mut body, 0xcafe_b0ba);
+            let header = format!(
+                "P7\nWIDTH 3\nHEIGHT 2\nDEPTH {depth}\nMAXVAL 255\nTUPLTYPE {tupltype}\nENDHDR\n",
+            );
+            let mut buf = header.into_bytes();
+            buf.extend_from_slice(&body);
+            let (image, _fmt) = decode_pbm(&buf).unwrap();
+            assert_eq!(image.planes[0].stride, 3 * depth, "{label}");
+            assert_eq!(image.planes[0].data, body, "{label}");
+        }
+    }
+
+    #[test]
+    fn decode_bytewise_matches_legacy_for_every_16bit_magic() {
+        // 16-bit fast path: the plane bytes are the per-sample LE
+        // byte swap of the wire bytes. Verified by re-swapping the
+        // plane and comparing to the original wire body.
+        let mut body = vec![0u8; 6 * 4 * 2]; // P5 6×4 gray16
+        fill_xorshift(&mut body, 0xfeed_face);
+        let mut buf = Vec::from(b"P5\n6 4\n65535\n".as_slice());
+        buf.extend_from_slice(&body);
+        let (image, _fmt) = decode_pbm(&buf).unwrap();
+        let mut roundtrip = vec![0u8; body.len()];
+        for (s, d) in image.planes[0]
+            .data
+            .chunks_exact(2)
+            .zip(roundtrip.chunks_exact_mut(2))
+        {
+            d[0] = s[1];
+            d[1] = s[0];
+        }
+        assert_eq!(roundtrip, body);
+        // Same shape for P6 16-bit and P7 RGB_ALPHA 16-bit.
+        for (bpp, header) in [
+            (6usize, "P6\n6 4\n65535\n".to_string()),
+            (
+                8,
+                "P7\nWIDTH 6\nHEIGHT 4\nDEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\nENDHDR\n"
+                    .to_string(),
+            ),
+        ] {
+            let mut body = vec![0u8; 6 * 4 * bpp];
+            fill_xorshift(&mut body, 0xb16b_00b5);
+            let mut buf = header.into_bytes();
+            buf.extend_from_slice(&body);
+            let (image, _fmt) = decode_pbm(&buf).unwrap();
+            let mut roundtrip = vec![0u8; body.len()];
+            for (s, d) in image.planes[0]
+                .data
+                .chunks_exact(2)
+                .zip(roundtrip.chunks_exact_mut(2))
+            {
+                d[0] = s[1];
+                d[1] = s[0];
+            }
+            assert_eq!(roundtrip, body, "bpp={bpp}");
+        }
+    }
+
+    #[test]
+    fn decode_bytewise_rejects_truncated_body() {
+        // 6×4 P6 8-bit needs 72 body bytes; we supply 10. Must reject
+        // before allocating the plane (mirrors the round-171 OOM
+        // hardening on the generic decoder).
+        let mut buf = Vec::from(b"P6\n6 4\n255\n".as_slice());
+        buf.extend_from_slice(&[0xAA; 10]);
+        let err = decode_pbm(&buf).unwrap_err();
+        match err {
+            crate::error::PbmError::InvalidData(s) => {
+                assert!(s.contains("truncated"), "unexpected message: {s}");
+            }
+            other => panic!("expected InvalidData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_bytewise_rejects_oom_dimension() {
+        // P5 16-bit with multi-billion height: stride × height
+        // overflows or vastly exceeds body.len(). Must fail without
+        // the multi-GiB plane allocation.
+        let buf = b"P5\n8 200888808\n65535\n\x00\x00\x00\x00";
         let err = decode_pbm(buf).unwrap_err();
         match err {
             crate::error::PbmError::InvalidData(_) => {}

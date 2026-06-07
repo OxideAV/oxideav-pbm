@@ -164,9 +164,31 @@ two Portable FloatMap magics (`Pf` / `PF`) in both byte orders, so
 future optimisation rounds can A/B-compare SIMD byte-swap (P5/P6
 16-bit, `Pf`/`PF` BE), branch-free bit packers (P4), or lookup-table
 ASCII writers (P2/P3) against a stable baseline. Indicative
-apple-silicon numbers on the binary path: ~1.7 GiB/s P6 8-bit
-decode, ~6.9 GiB/s P7 16-bit RGBA decode, ~26 GiB/s P7 8-bit
-GRAYSCALE_ALPHA encode. Round 248 closed the matching P4 decode bottleneck: `decode_pbm`
+apple-silicon numbers on the binary path: ~49 GiB/s P6 8-bit
+decode, ~50 GiB/s P7 16-bit RGBA decode, ~26 GiB/s P7 8-bit
+GRAYSCALE_ALPHA encode. Round 250 closed the last decode bottleneck the
+r248 P4 fast path left behind: binary `P5` / `P6` / `P7` 8-bit decode at
+`maxval=255` and 16-bit decode at `maxval=65535` (with one of the
+standard `GRAYSCALE` / `GRAYSCALE_ALPHA` / `RGB` / `RGB_ALPHA`
+tupltypes, plus the depth-routed `Custom` / no-tupltype cases) used to
+widen each wire byte into a `Vec<u16>` and then run the per-sample
+`scale_to_*` / `to_le_bytes` loop in `samples_to_plane` even though
+both transforms collapse to identity (8-bit) or a single byte swap
+(16-bit). A new `try_decode_binary_bytewise` helper in `src/decoder.rs`
+dispatches inside `decode_pbm` upfront body-length validation followed
+by either a single `data.copy_from_slice(&body[..total])` (8-bit) or a
+per-row `swap_bytes_u16_row` (16-bit) straight into the destination
+plane. PAM combinations that re-arrange channels
+(`BLACKANDWHITE` bit-pack, `BLACKANDWHITE_ALPHA` G→RGBA expansion,
+16-bit `GRAYSCALE_ALPHA` widened to RGBA because the catalogue has no
+`Ya16` variant) and any non-natural maxval still fall through to the
+generic widen-then-rescale path unchanged. Apple-silicon numbers
+against the round-249 baseline: decode `P5` 8-bit 640×480 ~6.1 µs
+(~48 GiB/s, ≈28× faster), `P5` 16-bit 640×480 ~11.6 µs (~45 GiB/s),
+`P6` 8-bit 640×480 ~16.5 µs (~49 GiB/s, ≈29× faster), `P6` 16-bit
+320×240 ~9.3 µs (~47 GiB/s), `P7` `RGB_ALPHA` 8-bit 320×240 ~6.1 µs
+(~48 GiB/s), `P7` `RGB_ALPHA` 16-bit 320×240 ~11.4 µs (~50 GiB/s,
+≈7.3× faster). Round 248 closed the matching P4 decode bottleneck: `decode_pbm`
 now dispatches a dedicated `decode_p4_monoblack` fast path that walks
 the wire body through the same `copy_p4_row_msb` row helper, skipping
 both the `Vec<u16>` sample-buffer allocation that `decode_binary`
