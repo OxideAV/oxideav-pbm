@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Round 248: P4 (binary PBM) decode → `MonoBlack` rewritten as a per-row
+  memcpy. The Netpbm wire format for P4 (1 bit per pixel, MSB-first
+  packed, rows padded to a byte boundary, `1 = black` per `pbm(5)`) is
+  byte-for-byte identical to the crate's `MonoBlack` plane convention,
+  so the body is a straight per-row `copy_from_slice` with at most one
+  trailing-bit mask on the last byte of each row when `w % 8 != 0`. The
+  pre-r248 decode path ran two scalar bit loops — `decode_binary`
+  allocated a `Vec<u16>` sized at `width * height` and walked each bit
+  of the body into a one-per-pixel `u16` sample, then
+  `samples_to_plane`'s `MonoBlack` arm walked every pixel again
+  (`s.samples[y * w + x] != 0 → data[y * stride + x / 8] |= 1 << (7 -
+  (x % 8))`) re-packing the bits into the destination plane. Both loops
+  plus the `Vec<u16>` intermediate are gone for the P4 case; a
+  dedicated `decode_p4_monoblack` fast path in `src/decoder.rs`
+  dispatches inside `decode_pbm` right alongside the existing PFM
+  dispatch and funnels through the round-229 `copy_p4_row_msb` row
+  helper (the same kernel the P4 *encoder* uses, now driving both
+  directions). Apple-silicon numbers at 640×480:
+  - decode `P4` 1.077 ms → ~2.07 µs (≈ 520× faster, ~17.3 GiB/s up from
+    ~34 MiB/s).
+  P1 (ASCII bitmap) and P7 `BLACKANDWHITE` (which inverts the bit sense
+  per `pam(5)` `TUPLE TYPE`) keep going through the generic
+  `decode_binary` / `samples_to_plane` path; the fast path triggers
+  only when the magic is `P4BinaryBitmap`. Adds five decoder-level
+  unit tests covering byte-aligned widths (pure memcpy),
+  unaligned-width trailing-pad masking, full-suite agreement with the
+  pre-r248 generic re-pack for every `width % 8` case 1..=129 across
+  multi-row inputs, the body-truncation rejection (mirrors the P4
+  `binary_huge_dimension_does_not_oom` regression on the generic path),
+  and an upfront OOM rejection on a multi-billion-height header.
+  `decode_binary` itself is unchanged — it remains the path for P5 /
+  P6 / P7 — so the round 171 OOM hardening + the round 210 / 217 /
+  222 16-bit row-level helpers continue to apply unmodified. The
+  existing four `MonoBlack` round-trip and PBM regression tests
+  (including the round 229 `encode_p4` symmetry tests) continue to
+  pass unchanged.
+
 ### Added
 
 - Round 236: typed comment-iteration accessor

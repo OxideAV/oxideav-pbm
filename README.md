@@ -166,7 +166,15 @@ future optimisation rounds can A/B-compare SIMD byte-swap (P5/P6
 ASCII writers (P2/P3) against a stable baseline. Indicative
 apple-silicon numbers on the binary path: ~1.7 GiB/s P6 8-bit
 decode, ~6.9 GiB/s P7 16-bit RGBA decode, ~26 GiB/s P7 8-bit
-GRAYSCALE_ALPHA encode. Round 229 closed the last remaining bit-pack
+GRAYSCALE_ALPHA encode. Round 248 closed the matching P4 decode bottleneck: `decode_pbm`
+now dispatches a dedicated `decode_p4_monoblack` fast path that walks
+the wire body through the same `copy_p4_row_msb` row helper, skipping
+both the `Vec<u16>` sample-buffer allocation that `decode_binary`
+would make and the per-bit re-pack loop in `samples_to_plane`'s
+`MonoBlack` arm. Apple-silicon: decode `P4` 640×480 1.077 ms →
+~2.07 µs (≈ 520× faster, ~17.3 GiB/s up from ~34 MiB/s).
+P1 (ASCII bitmap) and P7 `BLACKANDWHITE` (which inverts the bit
+sense per `pam(5)`) keep going through the generic path. Round 229 closed the last remaining bit-pack
 bottleneck flagged by both the encode + decode bench headers:
 `encode_p4` (binary PBM, MSB-packed bits) no longer unpacks the input
 into a `w * h`-byte intermediate and re-packs it through a per-bit
