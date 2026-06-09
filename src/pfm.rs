@@ -22,7 +22,7 @@
 //! byte-swaps when the on-disk order is big-endian.
 
 use crate::error::{PbmError as Error, Result};
-use crate::header::{parse_header, Header, PfmInfo};
+use crate::header::{parse_header, Header, Magic, PfmInfo};
 use crate::image::{PbmImage, PbmPixelFormat, PbmPlane};
 
 /// Byte order + scale recovered from a decoded Portable FloatMap header.
@@ -189,10 +189,21 @@ pub fn encode_pfm_plane(
     } else {
         scale.abs()
     };
-    let magic: &[u8] = if ch == 3 { b"PF\n" } else { b"Pf\n" };
+    // Route the PFM magic literal through the typed `Magic::wire_bytes`
+    // accessor — same shape as the PNM encoder's `header_pnm` after
+    // round 266 so the on-disk identifier is selected by variant rather
+    // than by an open-coded `b"PF" / b"Pf"` table. The two PFM variants
+    // are case-sensitive (`Pf` = grayscale, `PF` = RGB) and the typed
+    // accessor preserves that distinction.
+    let magic = if ch == 3 {
+        Magic::PFPfmRgbFloat
+    } else {
+        Magic::PfPfmGrayFloat
+    };
 
-    let mut out = Vec::with_capacity(magic.len() + 24 + row_bytes * h);
-    out.extend_from_slice(magic);
+    let mut out = Vec::with_capacity(3 + 24 + row_bytes * h);
+    out.extend_from_slice(magic.wire_bytes());
+    out.push(b'\n');
     out.extend_from_slice(format!("{w} {h}\n").as_bytes());
     out.extend_from_slice(format_scale(signed_scale).as_bytes());
     out.push(b'\n');

@@ -85,6 +85,51 @@ impl Magic {
         )
     }
 
+    /// `true` for the binary-body magics — `P4` / `P5` / `P6` / `P7` and
+    /// the two Portable FloatMap magics (`Pf` / `PF`). Symmetric to
+    /// [`Magic::is_ascii`]: every magic is either ASCII-bodied or
+    /// binary-bodied, so `m.is_binary() == !m.is_ascii()` for every
+    /// recognised value. Carved out as a typed predicate so call sites
+    /// no longer need to enumerate the four (or six, including PFM)
+    /// binary magic variants by hand to make routing decisions.
+    pub fn is_binary(self) -> bool {
+        !self.is_ascii()
+    }
+
+    /// `true` for the classic seven PNM/PAM magics (`P1` … `P7`) — the
+    /// integer-sample family the Netpbm man pages cover. `false` for the
+    /// two Portable FloatMap magics (`Pf` / `PF`), whose IEEE-754
+    /// binary32 samples and three-line comment-free header live in a
+    /// distinct spec (the Debevec PFM reference). Useful as a typed
+    /// dispatch hinge: PNM magics share the integer `MAXVAL` /
+    /// `bits_per_sample == {1, 8, 16}` shape; PFM magics don't.
+    pub fn is_pnm(self) -> bool {
+        !self.is_pfm()
+    }
+
+    /// Canonical on-disk magic bytes — the exact ASCII identifier the
+    /// Netpbm spec puts at the start of every file (`b"P1"` … `b"P7"`,
+    /// `b"Pf"`, `b"PF"`). Mirrors [`Magic::from_bytes`] in the opposite
+    /// direction so an encoder can write the magic without re-deriving
+    /// the digit / case from the variant by hand, and so a round-trip
+    /// caller can assert `Magic::from_bytes(m.wire_bytes()) == Some(m)`.
+    ///
+    /// Returns a `&'static [u8]` because every variant maps to a fixed
+    /// 2-byte literal; no allocation is required.
+    pub fn wire_bytes(self) -> &'static [u8] {
+        match self {
+            Self::P1AsciiBitmap => b"P1",
+            Self::P2AsciiGraymap => b"P2",
+            Self::P3AsciiPixmap => b"P3",
+            Self::P4BinaryBitmap => b"P4",
+            Self::P5BinaryGraymap => b"P5",
+            Self::P6BinaryPixmap => b"P6",
+            Self::P7Pam => b"P7",
+            Self::PfPfmGrayFloat => b"Pf",
+            Self::PFPfmRgbFloat => b"PF",
+        }
+    }
+
     /// Channels-per-pixel implied by the magic. PAM is variable so this
     /// only covers P1-P6.
     pub fn channels(self) -> Option<usize> {
@@ -948,6 +993,118 @@ mod tests {
         let buf = b"P5\n# header\n2 1\n255\n\x23\x23";
         let comments: Vec<&[u8]> = iter_pnm_header_comments(buf).collect();
         assert_eq!(comments, vec![&b"header"[..]]);
+    }
+
+    #[test]
+    fn magic_wire_bytes_round_trips_through_from_bytes() {
+        // Every recognised variant must hand back its canonical on-disk
+        // identifier, and `from_bytes` must accept it: the two halves of
+        // the typed primitive form a closed loop. Catches accidental
+        // mis-typed table entries (e.g. `b"P1"` vs `b"p1"`, swapped
+        // `Pf` / `PF` case) at compile + test time so the encoder can
+        // funnel every magic write through `wire_bytes()` without an
+        // open-coded literal table.
+        for m in [
+            Magic::P1AsciiBitmap,
+            Magic::P2AsciiGraymap,
+            Magic::P3AsciiPixmap,
+            Magic::P4BinaryBitmap,
+            Magic::P5BinaryGraymap,
+            Magic::P6BinaryPixmap,
+            Magic::P7Pam,
+            Magic::PfPfmGrayFloat,
+            Magic::PFPfmRgbFloat,
+        ] {
+            let bytes = m.wire_bytes();
+            assert_eq!(
+                bytes.len(),
+                2,
+                "every Netpbm magic is exactly two bytes on disk"
+            );
+            assert_eq!(bytes[0], b'P', "Netpbm magic always starts with 'P'");
+            assert_eq!(
+                Magic::from_bytes(bytes),
+                Some(m),
+                "wire_bytes ↔ from_bytes must round-trip for {m:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn magic_wire_bytes_case_sensitivity_for_pfm() {
+        // `Pf` and `PF` differ only in case; the PFM spec is
+        // case-sensitive (lowercase `f` = single-channel grayscale,
+        // uppercase `F` = 3-channel RGB) so the typed accessor must
+        // preserve both halves rather than collapsing them.
+        assert_eq!(Magic::PfPfmGrayFloat.wire_bytes(), b"Pf");
+        assert_eq!(Magic::PFPfmRgbFloat.wire_bytes(), b"PF");
+        assert_ne!(
+            Magic::PfPfmGrayFloat.wire_bytes(),
+            Magic::PFPfmRgbFloat.wire_bytes()
+        );
+    }
+
+    #[test]
+    fn magic_is_binary_is_exact_complement_of_is_ascii() {
+        // The typed predicate is symmetric with `is_ascii` — every
+        // recognised magic is exactly one of the two. Encoders that
+        // need to branch on body-shape (e.g. ASCII vs binary writers)
+        // can use either; the symmetry test pins the contract so a
+        // future variant added without updating one of the predicates
+        // is caught here rather than at the call site.
+        for m in [
+            Magic::P1AsciiBitmap,
+            Magic::P2AsciiGraymap,
+            Magic::P3AsciiPixmap,
+            Magic::P4BinaryBitmap,
+            Magic::P5BinaryGraymap,
+            Magic::P6BinaryPixmap,
+            Magic::P7Pam,
+            Magic::PfPfmGrayFloat,
+            Magic::PFPfmRgbFloat,
+        ] {
+            assert_ne!(
+                m.is_ascii(),
+                m.is_binary(),
+                "is_ascii and is_binary must partition the magic set for {m:?}"
+            );
+        }
+        // Spot-check both sides of the partition explicitly.
+        assert!(Magic::P1AsciiBitmap.is_ascii() && !Magic::P1AsciiBitmap.is_binary());
+        assert!(Magic::P4BinaryBitmap.is_binary() && !Magic::P4BinaryBitmap.is_ascii());
+        assert!(Magic::PfPfmGrayFloat.is_binary());
+        assert!(Magic::PFPfmRgbFloat.is_binary());
+    }
+
+    #[test]
+    fn magic_is_pnm_is_exact_complement_of_is_pfm() {
+        // `is_pnm` is the typed dispatch hinge for "this magic is in the
+        // integer P1..=P7 family"; it must complement `is_pfm` exactly
+        // so callers can pick either side of the partition without
+        // tripping on a future variant. Mirrors the
+        // is_ascii ↔ is_binary symmetry above.
+        for m in [
+            Magic::P1AsciiBitmap,
+            Magic::P2AsciiGraymap,
+            Magic::P3AsciiPixmap,
+            Magic::P4BinaryBitmap,
+            Magic::P5BinaryGraymap,
+            Magic::P6BinaryPixmap,
+            Magic::P7Pam,
+            Magic::PfPfmGrayFloat,
+            Magic::PFPfmRgbFloat,
+        ] {
+            assert_ne!(
+                m.is_pnm(),
+                m.is_pfm(),
+                "is_pnm and is_pfm must partition the magic set for {m:?}"
+            );
+        }
+        // Spot-check the two non-PNM members (the only ones in the PFM
+        // family) — every other variant lives on the PNM side.
+        assert!(Magic::PfPfmGrayFloat.is_pfm() && !Magic::PfPfmGrayFloat.is_pnm());
+        assert!(Magic::PFPfmRgbFloat.is_pfm() && !Magic::PFPfmRgbFloat.is_pnm());
+        assert!(Magic::P7Pam.is_pnm() && !Magic::P7Pam.is_pfm());
     }
 
     #[test]

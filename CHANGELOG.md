@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round 266: typed `Magic::wire_bytes()` accessor and symmetric
+  `Magic::is_binary()` / `Magic::is_pnm()` predicates, matching the
+  existing `is_ascii()` / `is_pfm()` shape. `wire_bytes()` returns the
+  canonical on-disk magic literal (`b"P1"` … `b"P7"`, `b"Pf"`, `b"PF"`)
+  as a `&'static [u8]`, mirroring `Magic::from_bytes` in the opposite
+  direction so an encoder no longer needs to keep a parallel digit /
+  case table that drifts away from the typed `Magic` variants. The
+  PNM encoder's `header_pnm` helper now takes a `Magic` argument and
+  funnels the wire literal through `magic.wire_bytes()`; the PAM
+  encoder's `header_pam` and the PFM encoder both route their fixed
+  magic write through the same accessor. The two new predicates form
+  exact partitions with their counterparts (`is_ascii() ↔ is_binary()`
+  and `is_pfm() ↔ is_pnm()`), pinned by partition-symmetry tests so a
+  future variant added without updating one side fails here rather
+  than at a call site. Adds two round-trip tests
+  (`magic_wire_bytes_round_trips_through_from_bytes`,
+  `magic_wire_bytes_case_sensitivity_for_pfm`) that assert
+  `Magic::from_bytes(m.wire_bytes()) == Some(m)` for every variant and
+  pin the PFM `Pf` vs `PF` case-sensitivity. No behavioural change on
+  the wire — every encoder still emits the same bytes, the typed
+  primitive only replaces the open-coded byte literals.
+
 ### Changed
 
 - Round 253: P7 `RGB_ALPHA` 8-bit encode from a `Bgra` source plane

@@ -28,6 +28,7 @@ use crate::error::{PbmError as Error, Result};
 
 use crate::ascii::{encode_ascii_body_bits, encode_ascii_body_u8};
 use crate::binary::{bgra_to_rgba_row, copy_p4_row_msb, swap_bytes_u16_row};
+use crate::header::Magic;
 use crate::image::{PbmImage, PbmPixelFormat, PbmPlane};
 
 #[cfg(feature = "registry")]
@@ -343,10 +344,18 @@ pub fn encode_pbm_ascii_plane(
 // Binary writers — one per output magic
 // ---------------------------------------------------------------------------
 
-fn header_pnm(magic: u8, w: usize, h: usize, maxval: Option<u32>) -> Vec<u8> {
+fn header_pnm(magic: Magic, w: usize, h: usize, maxval: Option<u32>) -> Vec<u8> {
+    // Route the on-disk magic literal through `Magic::wire_bytes()` so
+    // the encoder no longer carries a parallel `b'4' / b'5' / b'6'`
+    // digit table that drifts away from the typed `Magic` variants over
+    // time. `wire_bytes()` is a `&'static [u8]` accessor — no allocation,
+    // same code shape as the previous two `push` calls.
+    debug_assert!(
+        magic.is_pnm() && magic != Magic::P7Pam,
+        "header_pnm only emits P1..=P6 magics; P7 PAM and PFM use dedicated writers"
+    );
     let mut out = Vec::with_capacity(32);
-    out.push(b'P');
-    out.push(magic);
+    out.extend_from_slice(magic.wire_bytes());
     out.push(b'\n');
     out.extend_from_slice(format!("{w} {h}\n").as_bytes());
     if let Some(mv) = maxval {
@@ -375,7 +384,7 @@ fn encode_p4(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     // Net effect at 640×480: one ~307 KiB allocation gone, the inner
     // bit loops gone, the body work is a straight memcpy lane.
     let row_bytes = w.div_ceil(8);
-    let mut out = header_pnm(b'4', w, h, None);
+    let mut out = header_pnm(Magic::P4BinaryBitmap, w, h, None);
     let body_start = out.len();
     out.resize(body_start + row_bytes * h, 0);
     for y in 0..h {
@@ -387,7 +396,7 @@ fn encode_p4(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
 }
 
 fn encode_p5_gray8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
-    let mut out = header_pnm(b'5', w, h, Some(255));
+    let mut out = header_pnm(Magic::P5BinaryGraymap, w, h, Some(255));
     for y in 0..h {
         out.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w]);
     }
@@ -395,7 +404,7 @@ fn encode_p5_gray8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
 }
 
 fn encode_p5_gray16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
-    let mut out = header_pnm(b'5', w, h, Some(65535));
+    let mut out = header_pnm(Magic::P5BinaryGraymap, w, h, Some(65535));
     // `Gray16Le` stores LE bytes; on-disk Netpbm wants BE. Funnel the
     // per-row LE→BE swap through the row-level `swap_bytes_u16_row`
     // helper from `binary.rs` so the inner loop walks
@@ -414,7 +423,7 @@ fn encode_p5_gray16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
 }
 
 fn encode_p6_rgb8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
-    let mut out = header_pnm(b'6', w, h, Some(255));
+    let mut out = header_pnm(Magic::P6BinaryPixmap, w, h, Some(255));
     for y in 0..h {
         out.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w * 3]);
     }
@@ -422,7 +431,7 @@ fn encode_p6_rgb8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
 }
 
 fn encode_p6_rgb16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
-    let mut out = header_pnm(b'6', w, h, Some(65535));
+    let mut out = header_pnm(Magic::P6BinaryPixmap, w, h, Some(65535));
     // Same LE→BE row swap as P5 16-bit, but three samples per pixel.
     // The chunked swap is channel-agnostic (it just walks 2-byte
     // samples), so 3 channels reuses the helper unchanged.
@@ -439,7 +448,8 @@ fn encode_p6_rgb16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
 
 fn header_pam(w: usize, h: usize, depth: u32, maxval: u32, tupltype: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(96);
-    out.extend_from_slice(b"P7\n");
+    out.extend_from_slice(Magic::P7Pam.wire_bytes());
+    out.push(b'\n');
     out.extend_from_slice(format!("WIDTH {w}\n").as_bytes());
     out.extend_from_slice(format!("HEIGHT {h}\n").as_bytes());
     out.extend_from_slice(format!("DEPTH {depth}\n").as_bytes());
@@ -566,7 +576,7 @@ fn encode_p7_ya8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
 fn emit_ascii_pbm_header_and_body(plane: &PbmPlane, w: usize, h: usize) -> Vec<u8> {
     // Direct bit-to-ASCII writer — avoids the temporary `Vec<u16>` the
     // generic `encode_ascii_body` would otherwise need.
-    let mut out = header_pnm(b'1', w, h, None);
+    let mut out = header_pnm(Magic::P1AsciiBitmap, w, h, None);
     out.extend(encode_ascii_body_bits(&plane.data, plane.stride, w, h));
     out
 }
@@ -578,7 +588,7 @@ fn emit_ascii_pgm_8(plane: &PbmPlane, w: usize, h: usize) -> Vec<u8> {
     for y in 0..h {
         samples.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w]);
     }
-    let mut out = header_pnm(b'2', w, h, Some(255));
+    let mut out = header_pnm(Magic::P2AsciiGraymap, w, h, Some(255));
     out.extend(encode_ascii_body_u8(&samples, w));
     out
 }
@@ -591,7 +601,7 @@ fn emit_ascii_ppm_8(plane: &PbmPlane, w: usize, h: usize) -> Vec<u8> {
     for y in 0..h {
         samples.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w * 3]);
     }
-    let mut out = header_pnm(b'3', w, h, Some(255));
+    let mut out = header_pnm(Magic::P3AsciiPixmap, w, h, Some(255));
     out.extend(encode_ascii_body_u8(&samples, w * 3));
     out
 }
