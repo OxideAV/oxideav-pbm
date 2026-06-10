@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Round 275: the PFM (`Pf` / `PF`) header decoder now rejects a
+  degenerate scale / endianness line — `±0.0` and `±inf` — in addition
+  to the `NaN` it already rejected, closing a decode/encode asymmetry.
+  Per the Debevec PFM reference the third header line's *sign* selects
+  the raster byte order and its *magnitude* is an application-defined
+  scale factor; zero is not a usable scale factor (and a positive
+  zero's sign is not a reliable byte-order selector), and `±inf` is not
+  a finite scale factor a conformant writer emits. The encoder already
+  refused both (`!scale.is_finite() || scale == 0.0`), so `parse_scale`
+  now accepts exactly the set the encoder can produce. Adds
+  `pfm_rejects_zero_scale` and `pfm_rejects_infinite_scale` header unit
+  tests covering `0`, `0.0`, `-0.0`, `inf`, and `-inf`. Purely a
+  rejection-path tightening — every previously-decodable PFM stream
+  still decodes unchanged.
+
 ### Added
 
 - Round 266: typed `Magic::wire_bytes()` accessor and symmetric

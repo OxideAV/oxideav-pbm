@@ -86,7 +86,11 @@ PFM reference).
 - **Byte order** is carried by the *sign* of the scale line: negative ⇒
   little-endian, positive ⇒ big-endian. Its *absolute value* is an
   application-defined scale factor, preserved as metadata (not applied to
-  the pixels).
+  the pixels). A degenerate scale line is rejected on decode so the
+  parser accepts exactly the set the encoder can write: `NaN` (no usable
+  sign for byte order), `±0.0` (zero is not a scale factor and a positive
+  zero's sign is not a reliable endianness selector), and `±inf` (not a
+  finite scale factor) all fail.
 - **Row order on disk is bottom-to-top**; the decoder flips rows so the
   in-memory plane is the conventional top-to-bottom layout. In memory the
   float samples are always little-endian (`GrayF32` = 4 B/px, `RgbF32` =

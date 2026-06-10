@@ -635,7 +635,19 @@ fn parse_two_uints(line: &[u8]) -> Result<(u32, u32)> {
 }
 
 /// Parse the PFM scale / endianness line as an IEEE-754 binary32 value.
-/// A `NaN` is rejected because its sign cannot disambiguate byte order.
+///
+/// Per the Debevec PFM reference the third header line carries two pieces
+/// of information: its **sign** selects the raster byte order (negative ⇒
+/// little-endian, positive ⇒ big-endian) and its **magnitude** is an
+/// application-defined scale factor. Degenerate values cannot serve either
+/// role, so the decoder rejects them — the accepted set then matches
+/// exactly what [`crate::encode_pfm`] can write (`!is_finite() || == 0.0`):
+///
+/// * `NaN` has no usable sign, so it cannot disambiguate byte order.
+/// * `±0.0` is rejected too: zero is not a meaningful scale factor and a
+///   positive zero's sign is not a reliable endianness selector (most
+///   writers cannot emit `-0.0`).
+/// * `±inf` is not a finite scale factor a conformant writer emits.
 fn parse_scale(line: &[u8]) -> Result<f32> {
     let s = std::str::from_utf8(line).map_err(|_| Error::invalid("PFM: non-UTF-8 scale line"))?;
     let v: f32 = s
@@ -644,6 +656,16 @@ fn parse_scale(line: &[u8]) -> Result<f32> {
         .map_err(|e| Error::invalid(format!("PFM: bad scale '{}': {e}", s.trim())))?;
     if v.is_nan() {
         return Err(Error::invalid("PFM: scale is NaN (ambiguous byte order)"));
+    }
+    if !v.is_finite() {
+        return Err(Error::invalid(
+            "PFM: scale is infinite (not a valid scale factor)",
+        ));
+    }
+    if v == 0.0 {
+        return Err(Error::invalid(
+            "PFM: scale is zero (no usable scale factor or byte order)",
+        ));
     }
     Ok(v)
 }
@@ -917,6 +939,30 @@ mod tests {
     fn pfm_rejects_zero_dimension() {
         let buf = b"Pf\n0 2\n-1.0\n";
         assert!(parse_header(buf).is_err());
+    }
+
+    #[test]
+    fn pfm_rejects_zero_scale() {
+        // A scale of zero is degenerate: zero is not a usable scale
+        // factor and a positive zero's sign is not a reliable byte-order
+        // selector. Both spellings must be rejected so the decoder
+        // accepts exactly the set the encoder can produce.
+        for line in [&b"Pf\n2 2\n0\n"[..], b"Pf\n2 2\n0.0\n", b"Pf\n2 2\n-0.0\n"] {
+            assert!(
+                parse_header(line).is_err(),
+                "zero scale should be rejected: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pfm_rejects_infinite_scale() {
+        for line in [&b"Pf\n2 2\ninf\n"[..], b"Pf\n2 2\n-inf\n"] {
+            assert!(
+                parse_header(line).is_err(),
+                "infinite scale should be rejected: {line:?}"
+            );
+        }
     }
 
     #[test]
