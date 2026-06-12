@@ -6,10 +6,10 @@
 //! The first 7 bytes of the fuzz input choose the synthetic image:
 //!
 //! ```text
-//!   byte 0     : pixel-format selector (mod 9)
+//!   byte 0     : pixel-format selector (mod 12)
 //!   bytes 1-2  : width  as little-endian u16, capped to 0..=64
 //!   bytes 3-4  : height as little-endian u16, capped to 0..=64
-//!   bytes 5    : encode-format selector (mod 9)
+//!   bytes 5    : encode-format selector (mod 10)
 //!   byte  6    : stride bonus (mod 16) — additional row padding to
 //!                exercise the encoder's stride-vs-width handling.
 //!   bytes 7..  : plane data (truncated or zero-padded to fit).
@@ -33,7 +33,7 @@ use oxideav_pbm::{
 };
 
 fn select_pixel_format(b: u8) -> PbmPixelFormat {
-    match b % 11 {
+    match b % 12 {
         0 => PbmPixelFormat::MonoBlack,
         1 => PbmPixelFormat::Gray8,
         2 => PbmPixelFormat::Gray16Le,
@@ -43,7 +43,8 @@ fn select_pixel_format(b: u8) -> PbmPixelFormat {
         6 => PbmPixelFormat::Bgra,
         7 => PbmPixelFormat::Rgba64Le,
         8 => PbmPixelFormat::Ya8,
-        9 => PbmPixelFormat::GrayF32,
+        9 => PbmPixelFormat::Ya16Le,
+        10 => PbmPixelFormat::GrayF32,
         _ => PbmPixelFormat::RgbF32,
     }
 }
@@ -70,6 +71,7 @@ fn min_stride(format: PbmPixelFormat, width: usize) -> usize {
         PbmPixelFormat::MonoBlack => width.div_ceil(8),
         PbmPixelFormat::Gray8 => width,
         PbmPixelFormat::Ya8 => width * 2,
+        PbmPixelFormat::Ya16Le => width * 4,
         PbmPixelFormat::Gray16Le => width * 2,
         PbmPixelFormat::Rgb24 => width * 3,
         PbmPixelFormat::Rgba | PbmPixelFormat::Bgra => width * 4,

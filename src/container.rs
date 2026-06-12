@@ -112,7 +112,10 @@ fn pick_advertised_format(h: &crate::header::Header) -> Option<PixelFormat> {
             (Some(Tupltype::Rgb), _, false) => PixelFormat::Rgb24,
             (Some(Tupltype::Rgb), _, true) => PixelFormat::Rgb48Le,
             (Some(Tupltype::GrayscaleAlpha), _, false) => PixelFormat::Ya8,
-            (Some(Tupltype::GrayscaleAlpha), _, true) => PixelFormat::Rgba,
+            // 16-bit grayscale-with-alpha decodes as the crate-local
+            // `Ya16Le`, which has no core counterpart — advertise no
+            // pixel format (same as PFM; the decoder is self-describing).
+            (Some(Tupltype::GrayscaleAlpha), _, true) => return None,
             (Some(Tupltype::BlackAndWhiteAlpha), _, _) => PixelFormat::Rgba,
             (Some(Tupltype::RgbAlpha), _, false) => PixelFormat::Rgba,
             (Some(Tupltype::RgbAlpha), _, true) => PixelFormat::Rgba64Le,
@@ -120,7 +123,9 @@ fn pick_advertised_format(h: &crate::header::Header) -> Option<PixelFormat> {
             (None, 1, false) | (Some(Tupltype::Custom(_)), 1, false) => PixelFormat::Gray8,
             (None, 1, true) | (Some(Tupltype::Custom(_)), 1, true) => PixelFormat::Gray16Le,
             (None, 2, false) | (Some(Tupltype::Custom(_)), 2, false) => PixelFormat::Ya8,
-            (None, 2, true) | (Some(Tupltype::Custom(_)), 2, true) => PixelFormat::Rgba,
+            // Depth-2 16-bit also routes to `Ya16Le` — no core
+            // counterpart, advertise no pixel format.
+            (None, 2, true) | (Some(Tupltype::Custom(_)), 2, true) => return None,
             (None, 3, false) | (Some(Tupltype::Custom(_)), 3, false) => PixelFormat::Rgb24,
             (None, 3, true) | (Some(Tupltype::Custom(_)), 3, true) => PixelFormat::Rgb48Le,
             (None, 4, false) | (Some(Tupltype::Custom(_)), 4, false) => PixelFormat::Rgba,

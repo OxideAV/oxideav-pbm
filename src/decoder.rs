@@ -12,13 +12,13 @@
 //! | P7 GRAYSCALE 8/16       | `Gray8` / `Gray16Le` |
 //! | P7 RGB 8/16             | `Rgb24` / `Rgb48Le`  |
 //! | P7 GRAYSCALE_ALPHA 8    | `Ya8`          |
+//! | P7 GRAYSCALE_ALPHA 16   | `Ya16Le`       |
 //! | P7 RGB_ALPHA 8          | `Rgba`         |
 //! | P7 RGB_ALPHA 16         | `Rgba64Le`     |
 //!
-//! 16-bit grayscale-with-alpha and BLACKANDWHITE_ALPHA fall back to a
-//! 4-byte-per-pixel `Rgba` representation since the workspace's pixel
-//! catalogue doesn't carry a `Ya16` variant — the alpha channel is
-//! preserved either way.
+//! BLACKANDWHITE_ALPHA falls back to a 4-byte-per-pixel `Rgba`
+//! representation (the bit-valued first channel expands to a gray
+//! triplet) — the alpha channel is preserved either way.
 //!
 //! With the default `registry` feature on, the gated `PbmDecoder` trait
 //! impl wraps [`decode_pbm`] for the `oxideav_core::Decoder` surface.
@@ -213,9 +213,8 @@ fn decode_p4_monoblack(header: &Header, body: &[u8]) -> Result<(PbmImage, PbmPix
 /// (`GRAYSCALE` / `GRAYSCALE_ALPHA` / `RGB` / `RGB_ALPHA`) and the
 /// depth-routed `Custom` / no-tupltype cases. Tupltypes that involve a
 /// channel re-arrangement (`BLACKANDWHITE` → bit pack,
-/// `BLACKANDWHITE_ALPHA` → expand to RGBA, 16-bit `GRAYSCALE_ALPHA` →
-/// widen to RGBA) fall through to the generic path because their wire
-/// bytes do not line up with the plane bytes.
+/// `BLACKANDWHITE_ALPHA` → expand to RGBA) fall through to the generic
+/// path because their wire bytes do not line up with the plane bytes.
 fn try_decode_binary_bytewise(
     header: &Header,
     body: &[u8],
@@ -245,11 +244,10 @@ fn try_decode_binary_bytewise(
     //
     // PAM combinations that re-arrange channels are excluded even when
     // their wire byte count happens to coincide with the plane's: e.g.
-    // 16-bit `GRAYSCALE_ALPHA` widens 2 wire channels (G, A) into a
-    // 4-channel RGBA plane (G, G, G, A) because the catalogue has no
-    // `Ya16` variant — depth × bps == bpp but the byte mapping is not
-    // an identity. The generic path's `fill_rgba_u8`-style channel
-    // expander handles those cases unchanged.
+    // `BLACKANDWHITE_ALPHA` expands its bit-valued first channel into a
+    // gray triplet, so the byte mapping is not an identity. The generic
+    // path's `fill_rgba_u8`-style channel expander handles those cases
+    // unchanged.
     let depth = header.depth as usize;
     let bytes_per_pixel: usize = match (format, depth, bytes_per_sample) {
         (PbmPixelFormat::Gray8, 1, 1) => 1,
@@ -257,6 +255,7 @@ fn try_decode_binary_bytewise(
         (PbmPixelFormat::Gray16Le, 1, 2) => 2,
         (PbmPixelFormat::Rgb24, 3, 1) => 3,
         (PbmPixelFormat::Rgba, 4, 1) => 4,
+        (PbmPixelFormat::Ya16Le, 2, 2) => 4,
         (PbmPixelFormat::Rgb48Le, 3, 2) => 6,
         (PbmPixelFormat::Rgba64Le, 4, 2) => 8,
         _ => return Ok(None),
@@ -335,7 +334,7 @@ fn samples_to_plane(h: &Header, s: &DecodedSamples) -> Result<(PbmPlane, PbmPixe
         PbmPixelFormat::Ya8 => 2,
         PbmPixelFormat::Gray16Le => 2,
         PbmPixelFormat::Rgb24 => 3,
-        PbmPixelFormat::Rgba | PbmPixelFormat::Bgra => 4,
+        PbmPixelFormat::Rgba | PbmPixelFormat::Bgra | PbmPixelFormat::Ya16Le => 4,
         PbmPixelFormat::Rgb48Le => 6,
         PbmPixelFormat::Rgba64Le => 8,
         PbmPixelFormat::GrayF32 => 4,
@@ -422,6 +421,18 @@ fn samples_to_plane(h: &Header, s: &DecodedSamples) -> Result<(PbmPlane, PbmPixe
             for i in 0..(w * hh) {
                 data[i * 2] = scale_to_u8(s.samples[i * depth], h.maxval);
                 data[i * 2 + 1] = scale_to_u8(s.samples[i * depth + 1], h.maxval);
+            }
+            Ok((PbmPlane { stride, data }, format))
+        }
+        PbmPixelFormat::Ya16Le => {
+            let stride = w * 4;
+            let mut data = vec![0u8; stride * hh];
+            for i in 0..(w * hh) {
+                let g = scale_to_u16(s.samples[i * depth], h.maxval);
+                let a = scale_to_u16(s.samples[i * depth + 1], h.maxval);
+                let off = i * 4;
+                data[off..off + 2].copy_from_slice(&g.to_le_bytes());
+                data[off + 2..off + 4].copy_from_slice(&a.to_le_bytes());
             }
             Ok((PbmPlane { stride, data }, format))
         }
@@ -562,7 +573,7 @@ fn pick_pixel_format(h: &Header) -> Result<PbmPixelFormat> {
                 (Some(Tupltype::Rgb), _, false) => PbmPixelFormat::Rgb24,
                 (Some(Tupltype::Rgb), _, true) => PbmPixelFormat::Rgb48Le,
                 (Some(Tupltype::GrayscaleAlpha), _, false) => PbmPixelFormat::Ya8,
-                (Some(Tupltype::GrayscaleAlpha), _, true) => PbmPixelFormat::Rgba, // no Ya16 in core
+                (Some(Tupltype::GrayscaleAlpha), _, true) => PbmPixelFormat::Ya16Le,
                 (Some(Tupltype::BlackAndWhiteAlpha), _, _) => PbmPixelFormat::Rgba,
                 (Some(Tupltype::RgbAlpha), _, false) => PbmPixelFormat::Rgba,
                 (Some(Tupltype::RgbAlpha), _, true) => PbmPixelFormat::Rgba64Le,
@@ -573,7 +584,7 @@ fn pick_pixel_format(h: &Header) -> Result<PbmPixelFormat> {
                 (None, 1, false) | (Some(Tupltype::Custom(_)), 1, false) => PbmPixelFormat::Gray8,
                 (None, 1, true) | (Some(Tupltype::Custom(_)), 1, true) => PbmPixelFormat::Gray16Le,
                 (None, 2, false) | (Some(Tupltype::Custom(_)), 2, false) => PbmPixelFormat::Ya8,
-                (None, 2, true) | (Some(Tupltype::Custom(_)), 2, true) => PbmPixelFormat::Rgba,
+                (None, 2, true) | (Some(Tupltype::Custom(_)), 2, true) => PbmPixelFormat::Ya16Le,
                 (None, 3, false) | (Some(Tupltype::Custom(_)), 3, false) => PbmPixelFormat::Rgb24,
                 (None, 3, true) | (Some(Tupltype::Custom(_)), 3, true) => PbmPixelFormat::Rgb48Le,
                 (None, 4, false) | (Some(Tupltype::Custom(_)), 4, false) => PbmPixelFormat::Rgba,
@@ -879,22 +890,46 @@ mod tests {
     }
 
     #[test]
-    fn decode_bytewise_falls_through_for_p7_grayscale_alpha_16bit() {
-        // 16-bit `GRAYSCALE_ALPHA` widens 2 wire channels (G, A) to a
-        // 4-channel RGBA plane (G, G, G, A). The fast path's
-        // (format, depth, bps) gate excludes this case so the generic
-        // expander runs.
+    fn decode_bytewise_p7_ya16_swaps_to_le_plane() {
+        // 16-bit `GRAYSCALE_ALPHA` decodes natively as `Ya16Le`: two
+        // big-endian u16 wire channels (G, A) per pixel land in the
+        // plane as little-endian (G, A) pairs with full 16-bit
+        // precision — eligible for the bytewise fast path since the
+        // mapping is a pure per-sample byte swap.
         let mut buf = Vec::from(
-            b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n"
+            b"P7\nWIDTH 1\nHEIGHT 2\nDEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n"
                 .as_slice(),
         );
-        // G=0x1234, A=0xABCD — wire is BE.
-        buf.extend_from_slice(&[0x12, 0x34, 0xAB, 0xCD]);
+        // Row 0: G=0x1234, A=0xABCD; row 1: G=0x00FF, A=0xFF00 — BE wire.
+        buf.extend_from_slice(&[0x12, 0x34, 0xAB, 0xCD, 0x00, 0xFF, 0xFF, 0x00]);
         let (image, fmt) = decode_pbm(&buf).unwrap();
-        assert_eq!(fmt, PbmPixelFormat::Rgba);
-        // After 16→8 scaling: G→0x12 (high byte), A→0xAB. Plane is
-        // (G, G, G, A) per the GrayscaleAlpha layout.
-        assert_eq!(image.planes[0].data, [0x12, 0x12, 0x12, 0xAB]);
+        assert_eq!(fmt, PbmPixelFormat::Ya16Le);
+        assert_eq!(image.planes[0].stride, 4);
+        assert_eq!(
+            image.planes[0].data,
+            [0x34, 0x12, 0xCD, 0xAB, 0xFF, 0x00, 0x00, 0xFF]
+        );
+    }
+
+    #[test]
+    fn decode_p7_ya16_generic_path_scales_non_natural_maxval() {
+        // A non-natural maxval forces the generic widen-then-rescale
+        // path; the destination is still `Ya16Le` and each channel is
+        // scaled to the full 16-bit range. With maxval=1000:
+        // 500 → round(500 * 65535 / 1000) = 32768 (round-half-up),
+        // 1000 → 65535.
+        let mut buf = Vec::from(
+            b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 2\nMAXVAL 1000\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n"
+                .as_slice(),
+        );
+        // G=500, A=1000 as big-endian u16 wire samples.
+        buf.extend_from_slice(&[0x01, 0xF4, 0x03, 0xE8]);
+        let (image, fmt) = decode_pbm(&buf).unwrap();
+        assert_eq!(fmt, PbmPixelFormat::Ya16Le);
+        let g = u16::from_le_bytes(image.planes[0].data[0..2].try_into().unwrap());
+        let a = u16::from_le_bytes(image.planes[0].data[2..4].try_into().unwrap());
+        assert_eq!(g, super::scale_to_u16(500, 1000));
+        assert_eq!(a, 65535);
     }
 
     #[test]
@@ -974,9 +1009,15 @@ mod tests {
             d[1] = s[0];
         }
         assert_eq!(roundtrip, body);
-        // Same shape for P6 16-bit and P7 RGB_ALPHA 16-bit.
+        // Same shape for P6 16-bit, P7 GRAYSCALE_ALPHA 16-bit, and
+        // P7 RGB_ALPHA 16-bit.
         for (bpp, header) in [
             (6usize, "P6\n6 4\n65535\n".to_string()),
+            (
+                4,
+                "P7\nWIDTH 6\nHEIGHT 4\nDEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n"
+                    .to_string(),
+            ),
             (
                 8,
                 "P7\nWIDTH 6\nHEIGHT 4\nDEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\nENDHDR\n"

@@ -16,7 +16,7 @@ sources: the Netpbm man pages (`pbm(5)`, `pgm(5)`, `ppm(5)`, `pnm(5)`,
 | P4    | PBM  | Binary   | 1 (1-bit)  | 1         | `MonoBlack` |
 | P5    | PGM  | Binary   | 1          | 8 / 16    | `Gray8` / `Gray16Le` |
 | P6    | PPM  | Binary   | 3 (RGB)    | 8 / 16    | `Rgb24` / `Rgb48Le` |
-| P7    | PAM  | Binary   | 1-4, any `TUPLTYPE` (6 standard + arbitrary) | 1-16 | `MonoBlack` / `Gray*` / `Rgb*` / `Ya8` / `Rgba` / `Rgba64Le` |
+| P7    | PAM  | Binary   | 1-4, any `TUPLTYPE` (6 standard + arbitrary) | 1-16 | `MonoBlack` / `Gray*` / `Rgb*` / `Ya8` / `Ya16Le` / `Rgba` / `Rgba64Le` |
 | `Pf`  | PFM  | Binary   | 1 (gray)   | 32 float  | `GrayF32` |
 | `PF`  | PFM  | Binary   | 3 (RGB)    | 32 float  | `RgbF32` |
 
@@ -57,6 +57,7 @@ Picks the closest binary form for the input `PixelFormat`:
 | `Rgba`/`Bgra`  | P7 RGB_ALPHA (maxval 255) |
 | `Rgba64Le`     | P7 RGB_ALPHA (maxval 65535) |
 | `Ya8`          | P7 GRAYSCALE_ALPHA (maxval 255) |
+| `Ya16Le`       | P7 GRAYSCALE_ALPHA (maxval 65535) |
 | `GrayF32`      | `Pf` Portable FloatMap (little-endian, scale -1.0) |
 | `RgbF32`       | `PF` Portable FloatMap (little-endian, scale -1.0) |
 
@@ -114,13 +115,18 @@ masks, or scientific multi-channel volumes. The parser round-trips any
 non-standard name through a `Tupltype::Custom(String)` variant and
 routes the pixels through the same depth-based fallback used when
 `TUPLTYPE` is omitted entirely — channels reach the caller as
-`Gray8` / `Gray16Le` / `Ya8` / `Rgb24` / `Rgb48Le` / `Rgba` /
-`Rgba64Le` based on `DEPTH` (1..=4) and `MAXVAL`.
+`Gray8` / `Gray16Le` / `Ya8` / `Ya16Le` / `Rgb24` / `Rgb48Le` /
+`Rgba` / `Rgba64Le` based on `DEPTH` (1..=4) and `MAXVAL`.
 
-## Round-1 deferrals
-
-* 16-bit `GRAYSCALE_ALPHA` is widened to `Rgba` on decode (no `Ya16`
-  variant in `oxideav-core` yet).
+16-bit grayscale-with-alpha decodes natively as the crate-local
+`Ya16Le` (little-endian `Y, A` u16 pairs, 4 bytes per pixel) with
+full 16-bit precision. Like the two Portable FloatMap formats it has
+no `oxideav_core::PixelFormat` counterpart yet, so the framework
+codec/container path advertises no pixel format for it — the format
+is reachable through the standalone API and the crate-local
+`PbmImage` model. (`BLACKANDWHITE_ALPHA` still expands to `Rgba` —
+its bit-valued first channel needs the gray-triplet expansion
+either way.)
 
 ## Fuzzing
 

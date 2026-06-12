@@ -205,6 +205,39 @@ fn roundtrip_p7_ya8() {
 }
 
 #[test]
+fn roundtrip_p7_ya16() {
+    // 16-bit grayscale-with-alpha round-trips losslessly through PAM
+    // GRAYSCALE_ALPHA at MAXVAL 65535 — the plane holds LE (Y, A) u16
+    // pairs, the wire holds the BE swap of them.
+    let w = 9u32;
+    let h = 5u32;
+    let mut data = Vec::with_capacity((w * h) as usize * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let g = ((x * 7919 + y * 31337) & 0xFFFF) as u16;
+            let a = ((x * 104729 + y * 1299709 + 17) & 0xFFFF) as u16;
+            data.extend_from_slice(&g.to_le_bytes());
+            data.extend_from_slice(&a.to_le_bytes());
+        }
+    }
+    let src = PbmImage {
+        width: w,
+        height: h,
+        pixel_format: PbmPixelFormat::Ya16Le,
+        planes: vec![PbmPlane {
+            stride: w as usize * 4,
+            data,
+        }],
+        pts: None,
+    };
+    let bytes = encode_pbm(&src).unwrap();
+    assert!(bytes.starts_with(b"P7\n"));
+    let (back, fmt) = decode_pbm(&bytes).unwrap();
+    assert_eq!(fmt, PbmPixelFormat::Ya16Le);
+    assert_eq!(back.planes[0].data, src.planes[0].data);
+}
+
+#[test]
 fn ascii_p3_round_trip() {
     let src = pattern(5, 4, 3, PbmPixelFormat::Rgb24);
     let bytes = encode_pbm_ascii(&src).unwrap();
@@ -470,6 +503,22 @@ fn p7_custom_tupltype_depth1_16bit_decodes_as_gray16() {
     let (image, fmt) = decode_pbm(&buf).unwrap();
     assert_eq!(fmt, PbmPixelFormat::Gray16Le);
     // In-memory is little-endian.
+    assert_eq!(&image.planes[0].data[..4], &[0x34, 0x12, 0xCD, 0xAB]);
+}
+
+#[test]
+fn p7_custom_tupltype_depth2_16bit_decodes_as_ya16() {
+    // depth=2 + custom name + maxval > 255 routes through the same
+    // depth-based fallback as GRAYSCALE_ALPHA 16-bit: the channels
+    // reach the caller as little-endian (Y, A) u16 pairs with full
+    // 16-bit precision.
+    let mut buf = Vec::from(
+        b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 2\nMAXVAL 65535\nTUPLTYPE HEIGHT_FIELD\nENDHDR\n".as_slice(),
+    );
+    // Two big-endian u16 samples: Y=0x1234, A=0xABCD.
+    buf.extend_from_slice(&[0x12, 0x34, 0xAB, 0xCD]);
+    let (image, fmt) = decode_pbm(&buf).unwrap();
+    assert_eq!(fmt, PbmPixelFormat::Ya16Le);
     assert_eq!(&image.planes[0].data[..4], &[0x34, 0x12, 0xCD, 0xAB]);
 }
 

@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round 282: native 16-bit grayscale-with-alpha via a new crate-local
+  `PbmPixelFormat::Ya16Le` variant (little-endian `Y, A` u16 pairs,
+  4 bytes per pixel), closing the round-1 deferral. PAM
+  `GRAYSCALE_ALPHA` at `MAXVAL` > 255 — and the depth-2 16-bit
+  `Custom` / no-tupltype fallback — used to widen each (G, A) pixel
+  into an 8-bit `Rgba` plane (G, G, G, A) through `scale_to_u8`,
+  silently discarding the low byte of every sample. Decode now
+  preserves full 16-bit precision and becomes eligible for the
+  round-250 bytewise fast path (the wire layout is the plane layout
+  after a per-row u16 BE→LE swap), instead of falling through to the
+  per-sample widen-then-rescale loop. Encode side gains the symmetric
+  `Ya16Le` → P7 `GRAYSCALE_ALPHA` `MAXVAL 65535` path (auto routing
+  and the explicit `Pam7` selector), reusing the round-217
+  `swap_bytes_u16_row` row helper, so the pairing round-trips
+  losslessly. `Ya16Le` has no `oxideav_core::PixelFormat` counterpart
+  yet, so — same shape as the two Portable FloatMap formats — the
+  registry mapping returns `None` and the container demuxer advertises
+  no pixel format for these streams; the format is reachable through
+  the standalone API and the crate-local `PbmImage` model. Behavioural
+  change: callers that relied on the lossy `Rgba` widening now receive
+  `Ya16Le` planes. `BLACKANDWHITE_ALPHA` is unaffected (still expands
+  to `Rgba`; its bit-valued first channel needs the gray-triplet
+  expansion). Adds a fast-path decoder unit test, a non-natural-maxval
+  (`MAXVAL 1000`) generic-path scaling test, an encoder wire-byte +
+  selector-agreement test, a 16-bit swap-coverage entry in the
+  bytewise legacy-agreement suite, and two integration round-trips
+  (standard `GRAYSCALE_ALPHA` and a custom-tupltype depth-2 16-bit
+  stream); the `encode_roundtrip` fuzz target and the bench
+  `build_filled` matrices now enumerate the new variant.
+
 ### Fixed
 
 - Round 275: the PFM (`Pf` / `PF`) header decoder now rejects a

@@ -12,6 +12,7 @@
 //! | `Rgba` / `Bgra`    | P7 RGB_ALPHA (maxval 255) |
 //! | `Rgba64Le`         | P7 RGB_ALPHA (maxval 65535) |
 //! | `Ya8`              | P7 GRAYSCALE_ALPHA (maxval 255) |
+//! | `Ya16Le`           | P7 GRAYSCALE_ALPHA (maxval 65535) |
 //!
 //! Other pixel formats are rejected so the caller gets a clear error
 //! instead of a silent conversion. ASCII output (P1/P2/P3) can be
@@ -252,6 +253,7 @@ pub fn encode_pbm_with_format(image: &PbmImage, format: PbmEncodeFormat) -> Resu
             PbmPixelFormat::Bgra => encode_p7_bgra8(plane, w, h),
             PbmPixelFormat::Rgba64Le => encode_p7_rgba16(plane, w, h),
             PbmPixelFormat::Ya8 => encode_p7_ya8(plane, w, h),
+            PbmPixelFormat::Ya16Le => encode_p7_ya16(plane, w, h),
             other => Err(Error::unsupported(format!(
                 "PBM encoder: pixel format {other:?} cannot be emitted as P7"
             ))),
@@ -297,6 +299,7 @@ pub fn encode_pbm_plane(
         PbmPixelFormat::Bgra => encode_p7_bgra8(plane, w, h),
         PbmPixelFormat::Rgba64Le => encode_p7_rgba16(plane, w, h),
         PbmPixelFormat::Ya8 => encode_p7_ya8(plane, w, h),
+        PbmPixelFormat::Ya16Le => encode_p7_ya16(plane, w, h),
         // Float maps have no integer Netpbm form — emit Portable
         // FloatMap (`Pf` / `PF`). Default to little-endian (no byte swap
         // from the little-endian in-memory plane) with a unit scale.
@@ -565,6 +568,24 @@ fn encode_p7_ya8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     let mut out = header_pam(w, h, 2, 255, "GRAYSCALE_ALPHA");
     for y in 0..h {
         out.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w * 2]);
+    }
+    Ok(out)
+}
+
+fn encode_p7_ya16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
+    let mut out = header_pam(w, h, 2, 65535, "GRAYSCALE_ALPHA");
+    // Two 16-bit channels per pixel (Y, A) held little-endian in the
+    // plane; the wire wants big-endian. The row-level swap is
+    // channel-agnostic (it just walks 2-byte samples), so the same
+    // helper the P5 / P6 / P7 RGB / RGBA 16-bit paths use applies
+    // unchanged.
+    let row_bytes = w * 4;
+    let body_start = out.len();
+    out.resize(body_start + row_bytes * h, 0);
+    for y in 0..h {
+        let src = &plane.data[y * plane.stride..y * plane.stride + row_bytes];
+        let dst = &mut out[body_start + y * row_bytes..body_start + (y + 1) * row_bytes];
+        swap_bytes_u16_row(src, dst);
     }
     Ok(out)
 }
@@ -851,6 +872,33 @@ mod tests {
         assert!(s.contains("DEPTH 1"));
         assert!(s.contains("TUPLTYPE GRAYSCALE"));
         assert!(s.contains("MAXVAL 65535"));
+    }
+
+    #[test]
+    fn encode_p7_ya16_declares_grayscale_alpha_and_swaps_to_be() {
+        // `Ya16Le` → P7 GRAYSCALE_ALPHA at maxval 65535: the header must
+        // declare DEPTH 2 and the body must hold big-endian (Y, A)
+        // sample pairs swapped from the plane's little-endian layout.
+        let img = make_image(
+            PbmPixelFormat::Ya16Le,
+            2,
+            1,
+            8,
+            // Two LE (Y, A) pixels: (0x1234, 0xABCD) + (0x00FF, 0xFF00).
+            vec![0x34, 0x12, 0xCD, 0xAB, 0xFF, 0x00, 0x00, 0xFF],
+        );
+        let bytes = encode_pbm(&img).unwrap();
+        assert!(bytes.starts_with(b"P7\n"));
+        let body = &bytes[bytes.len() - 8..];
+        assert_eq!(body, &[0x12, 0x34, 0xAB, 0xCD, 0x00, 0xFF, 0xFF, 0x00]);
+        let s = std::str::from_utf8(&bytes[..bytes.len() - 8]).unwrap();
+        assert!(s.contains("DEPTH 2"));
+        assert!(s.contains("TUPLTYPE GRAYSCALE_ALPHA"));
+        assert!(s.contains("MAXVAL 65535"));
+        // The explicit `Pam7` selector must agree byte-for-byte with
+        // the auto-binary route (P7 is the only home for Ya16Le).
+        let explicit = encode_pbm_with_format(&img, PbmEncodeFormat::Pam7).unwrap();
+        assert_eq!(bytes, explicit);
     }
 
     #[test]

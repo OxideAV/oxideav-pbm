@@ -55,13 +55,13 @@ pub fn pixel_format_to_pbm(f: PixelFormat) -> Option<PbmPixelFormat> {
     })
 }
 
-/// Inverse of [`pixel_format_to_pbm`]. Every integer [`PbmPixelFormat`]
-/// has a matching `oxideav_core::PixelFormat`; the two Portable FloatMap
-/// formats ([`PbmPixelFormat::GrayF32`] / [`PbmPixelFormat::RgbF32`])
-/// have no counterpart in the core pixel-format catalogue, so this
-/// returns `None` for them — the float maps are reachable through the
-/// standalone [`crate::decode_pfm`] / [`crate::encode_pfm`] API and the
-/// crate-local [`PbmImage`](crate::PbmImage) model.
+/// Inverse of [`pixel_format_to_pbm`]. Formats without a counterpart in
+/// the core pixel-format catalogue return `None`: the two Portable
+/// FloatMap formats ([`PbmPixelFormat::GrayF32`] /
+/// [`PbmPixelFormat::RgbF32`]) and the 16-bit grayscale-with-alpha
+/// [`PbmPixelFormat::Ya16Le`]. All three are reachable through the
+/// standalone decode/encode API and the crate-local
+/// [`PbmImage`](crate::PbmImage) model.
 pub fn pbm_to_pixel_format(f: PbmPixelFormat) -> Option<PixelFormat> {
     Some(match f {
         PbmPixelFormat::MonoBlack => PixelFormat::MonoBlack,
@@ -73,7 +73,7 @@ pub fn pbm_to_pixel_format(f: PbmPixelFormat) -> Option<PixelFormat> {
         PbmPixelFormat::Bgra => PixelFormat::Bgra,
         PbmPixelFormat::Rgba64Le => PixelFormat::Rgba64Le,
         PbmPixelFormat::Ya8 => PixelFormat::Ya8,
-        PbmPixelFormat::GrayF32 | PbmPixelFormat::RgbF32 => return None,
+        PbmPixelFormat::Ya16Le | PbmPixelFormat::GrayF32 | PbmPixelFormat::RgbF32 => return None,
     })
 }
 

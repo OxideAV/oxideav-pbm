@@ -38,6 +38,14 @@ pub enum PbmPixelFormat {
     Rgba64Le,
     /// 8-bit grayscale + alpha (`Y, A`), 2 bytes per pixel.
     Ya8,
+    /// 16-bit grayscale + alpha (`Y, A`), little-endian, 4 bytes per
+    /// pixel. Decoded from / encoded to PAM `GRAYSCALE_ALPHA` at
+    /// `MAXVAL` > 255. Like the two float-map variants below, it has no
+    /// `oxideav_core::PixelFormat` counterpart yet, so the registry-side
+    /// conversion returns `None` for it — the format is reachable
+    /// through the standalone API and the crate-local [`PbmImage`]
+    /// model.
+    Ya16Le,
     /// Single-channel IEEE-754 binary32 (32-bit float) grayscale, one
     /// 4-byte sample per pixel. High-dynamic-range linear light. The
     /// plane stores each float in **little-endian** byte order (matching
