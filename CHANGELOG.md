@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 292: multi-image (concatenated) stream decoding. The
+  PNM/PAM/PFM family permits a single file to carry a sequence of
+  self-describing images packed back-to-back; the decoder previously
+  returned only the first and discarded the rest. New
+  `decode_pbm_multi(input) -> Vec<(PbmImage, PbmPixelFormat)>` walks
+  every image in stream order, and `decode_pbm_consumed(input) ->
+  (PbmImage, PbmPixelFormat, usize)` returns the byte count the first
+  image occupied so callers can locate the next one. Per-image lengths
+  are exact: binary (`P4`/`P5`/`P6`/`P7`) and PFM (`Pf`/`PF`) bodies are
+  computed from the dimensions, depth, and bits-per-sample; ASCII
+  (`P1`/`P2`/`P3`) bodies report the tokenizer's consumed cursor (the
+  offset of the byte after the final sample token), so a stream that
+  mixes ASCII and binary images decodes exactly. Inter-image ASCII
+  whitespace is skipped; a `#` between images is not a valid separator
+  (the magic must be the first two bytes of each image) and surfaces a
+  malformed-stream error rather than being silently swallowed. Trailing
+  whitespace after the last image is accepted; trailing non-whitespace
+  that does not begin a valid header is an error. `decode_pbm` is now a
+  thin wrapper over `decode_pbm_consumed` that drops the byte count, so
+  the single-image fast paths (P4 memcpy, P5/P6/P7 bytewise, PFM
+  bottom-to-top flip) are unchanged. New `tests/multi_image_stream.rs`
+  (12 cases) covers two binary images, mixed magics, ASCII-only,
+  ASCII↔binary interleaving, PFM pairs, trailing whitespace, the
+  comment-separator rejection, `decode_pbm` returning only the first
+  image, exact consumed length, garbage-tail rejection, and empty
+  input.
 - Round 282: native 16-bit grayscale-with-alpha via a new crate-local
   `PbmPixelFormat::Ya16Le` variant (little-endian `Y, A` u16 pairs,
   4 bytes per pixel), closing the round-1 deferral. PAM

@@ -25,7 +25,7 @@
 
 use crate::error::{PbmError as Error, Result};
 
-use crate::ascii::decode_ascii;
+use crate::ascii::decode_ascii_consumed;
 use crate::binary::{copy_p4_row_msb, decode_binary, swap_bytes_u16_row, DecodedSamples};
 use crate::header::{parse_header, Header, Magic, Tupltype};
 use crate::image::{PbmImage, PbmPixelFormat, PbmPlane};
@@ -98,13 +98,82 @@ fn image_to_video_frame(image: PbmImage) -> VideoFrame {
 
 /// Decode a complete Netpbm file (any of the seven magic numbers) into
 /// a [`PbmImage`] plus the [`PbmPixelFormat`] the image carries.
+///
+/// Only the *first* image in `input` is decoded; trailing bytes (e.g. a
+/// second concatenated image in a multi-image stream) are ignored. Use
+/// [`decode_pbm_multi`] to walk every image in a concatenated stream.
 pub fn decode_pbm(input: &[u8]) -> Result<(PbmImage, PbmPixelFormat)> {
+    decode_pbm_consumed(input).map(|(image, fmt, _consumed)| (image, fmt))
+}
+
+/// The Netpbm/PAM/PFM family permits a single file to carry a **sequence
+/// of concatenated images** — each a self-describing magic + header +
+/// body, packed back-to-back with optional whitespace between them
+/// (`pnm(5)` / `pam(5)` describe a file as holding "one or more" images;
+/// the Portable FloatMap reference likewise places the next header
+/// immediately after the prior raster). Decode every image in `input`,
+/// returning one `(PbmImage, PbmPixelFormat)` per image in stream order.
+///
+/// A single image is the common case and yields a one-element `Vec`.
+/// Bytes are consumed exactly: each image's on-disk length is the header
+/// length plus the body length (deterministic for the binary and PFM
+/// magics from the dimensions; for the ASCII magics it is the offset of
+/// the byte after the final sample token). Inter-image ASCII whitespace
+/// is skipped before the next magic is read — the magic must be the
+/// first two bytes of each image, so a `#` between images is *not* a
+/// valid separator. Trailing whitespace after the last image is not an
+/// error; trailing *non-whitespace* that does not begin a valid header
+/// is reported as a malformed stream.
+pub fn decode_pbm_multi(input: &[u8]) -> Result<Vec<(PbmImage, PbmPixelFormat)>> {
+    let mut images = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        // Skip inter-image whitespace. The magic number must be the
+        // first two bytes of each image (the PNM/PAM grammar puts the
+        // magic before any comment), so only ASCII whitespace — not a
+        // `#` comment — may separate concatenated images. A `#` here
+        // therefore falls through to `parse_header`, which rejects it
+        // as a missing magic, surfacing a malformed stream rather than
+        // silently swallowing bytes.
+        while offset < input.len() && is_ascii_ws(input[offset]) {
+            offset += 1;
+        }
+        if offset >= input.len() {
+            break;
+        }
+        let (image, fmt, consumed) = decode_pbm_consumed(&input[offset..])?;
+        images.push((image, fmt));
+        debug_assert!(consumed > 0, "decode consumed zero bytes — would loop");
+        if consumed == 0 {
+            // Defence-in-depth: never spin forever on a degenerate header.
+            return Err(Error::invalid("Netpbm: image consumed zero bytes"));
+        }
+        offset += consumed;
+    }
+    if images.is_empty() {
+        return Err(Error::invalid("Netpbm: no images in stream"));
+    }
+    Ok(images)
+}
+
+#[inline]
+fn is_ascii_ws(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\r' | b'\n' | 0x0B | 0x0C)
+}
+
+/// Decode the first image in `input` and report how many bytes of
+/// `input` it occupied (header + body, excluding any trailing inter-image
+/// whitespace). The byte count lets [`decode_pbm_multi`] locate the next
+/// concatenated image; single-image [`decode_pbm`] discards it.
+pub fn decode_pbm_consumed(input: &[u8]) -> Result<(PbmImage, PbmPixelFormat, usize)> {
     let header = parse_header(input)?;
     let body = &input[header.data_offset..];
     // Portable FloatMap has a wholly different (float, bottom-to-top,
     // endianness-tagged) body — hand it to the dedicated decoder.
     if header.magic.is_pfm() {
-        return crate::pfm::decode_pfm_image(&header, body);
+        let (image, fmt) = crate::pfm::decode_pfm_image(&header, body)?;
+        let body_len = pfm_body_byte_len(&header)?;
+        return Ok((image, fmt, header.data_offset + body_len));
     }
     // P4 → `MonoBlack` fast path. The wire format (MSB-first packed
     // bits, rows padded to a byte boundary, `1 = black`) is byte-for-byte
@@ -117,7 +186,9 @@ pub fn decode_pbm(input: &[u8]) -> Result<(PbmImage, PbmPixelFormat)> {
     // P1 (ASCII bitmap) and P7 `BLACKANDWHITE` (which inverts the bit
     // sense per `pam(5)`) still go through the generic path.
     if matches!(header.magic, Magic::P4BinaryBitmap) {
-        return decode_p4_monoblack(&header, body);
+        let (image, fmt) = decode_p4_monoblack(&header, body)?;
+        let body_len = binary_body_byte_len(&header)?;
+        return Ok((image, fmt, header.data_offset + body_len));
     }
     // Binary 8-bit (maxval=255) and 16-bit (maxval=65535) hot path. When
     // the wire sample layout matches the plane byte layout — P5 / P6 /
@@ -130,13 +201,19 @@ pub fn decode_pbm(input: &[u8]) -> Result<(PbmImage, PbmPixelFormat)> {
     // `to_le_bytes` loop in `samples_to_plane`. Symmetric with the
     // round-229 `encode_p4` and round-248 `decode_p4_monoblack`
     // memcpy rewrites.
-    if let Some(out) = try_decode_binary_bytewise(&header, body)? {
-        return Ok(out);
+    if let Some((image, fmt)) = try_decode_binary_bytewise(&header, body)? {
+        let body_len = binary_body_byte_len(&header)?;
+        return Ok((image, fmt, header.data_offset + body_len));
     }
-    let samples = if header.magic.is_ascii() {
-        decode_ascii(&header, body)?
+    // ASCII bodies have no closed-form byte length (whitespace and
+    // comment runs vary), so the tokenizer reports its consumed cursor;
+    // binary bodies are deterministic from the dimensions.
+    let (samples, body_len) = if header.magic.is_ascii() {
+        let (samples, cursor) = decode_ascii_consumed(&header, body)?;
+        (samples, cursor)
     } else {
-        decode_binary(&header, body)?
+        let samples = decode_binary(&header, body)?;
+        (samples, binary_body_byte_len(&header)?)
     };
     let (plane, format) = samples_to_plane(&header, &samples)?;
     Ok((
@@ -148,7 +225,47 @@ pub fn decode_pbm(input: &[u8]) -> Result<(PbmImage, PbmPixelFormat)> {
             pts: None,
         },
         format,
+        header.data_offset + body_len,
     ))
+}
+
+/// On-disk body byte length for the **binary** PNM/PAM magics
+/// (`P4` / `P5` / `P6` / `P7`). Deterministic from the dimensions,
+/// depth, and bits-per-sample. Mirrors the `need` computation each
+/// binary decode path performs before allocating, so a stream walked by
+/// [`decode_pbm_multi`] lands exactly on the next image's magic.
+fn binary_body_byte_len(h: &Header) -> Result<usize> {
+    let w = h.width as usize;
+    let hh = h.height as usize;
+    let depth = h.depth as usize;
+    match h.magic {
+        Magic::P4BinaryBitmap => w
+            .div_ceil(8)
+            .checked_mul(hh)
+            .ok_or_else(|| Error::invalid("Netpbm: dimension overflow")),
+        Magic::P5BinaryGraymap | Magic::P6BinaryPixmap | Magic::P7Pam => {
+            let bytes_per_sample = if h.bits_per_sample() == 16 { 2 } else { 1 };
+            w.checked_mul(hh)
+                .and_then(|v| v.checked_mul(depth))
+                .and_then(|v| v.checked_mul(bytes_per_sample))
+                .ok_or_else(|| Error::invalid("Netpbm: dimension overflow"))
+        }
+        _ => Err(Error::invalid(
+            "binary_body_byte_len called with non-binary magic",
+        )),
+    }
+}
+
+/// On-disk body byte length for a Portable FloatMap header:
+/// `width * height * channels * 4` IEEE-754 binary32 bytes.
+fn pfm_body_byte_len(h: &Header) -> Result<usize> {
+    let w = h.width as usize;
+    let hh = h.height as usize;
+    let ch = h.depth as usize;
+    w.checked_mul(hh)
+        .and_then(|v| v.checked_mul(ch))
+        .and_then(|v| v.checked_mul(4))
+        .ok_or_else(|| Error::invalid("PFM: raster-size overflow"))
 }
 
 /// P4 (binary PBM) → `MonoBlack` row-level memcpy fast path. Validates

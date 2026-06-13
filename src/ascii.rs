@@ -18,6 +18,16 @@ use crate::header::{Header, Magic};
 
 /// Decode the ASCII body of a P1/P2/P3 image.
 pub fn decode_ascii(h: &Header, body: &[u8]) -> Result<DecodedSamples> {
+    decode_ascii_consumed(h, body).map(|(s, _)| s)
+}
+
+/// Decode the ASCII body of a P1/P2/P3 image, additionally reporting how
+/// many bytes of `body` were consumed up to and including the final
+/// sample token (but *not* any trailing whitespace after it). The
+/// multi-image stream decoder uses the consumed length to locate the
+/// next concatenated image's magic; single-image [`decode_ascii`]
+/// discards it.
+pub fn decode_ascii_consumed(h: &Header, body: &[u8]) -> Result<(DecodedSamples, usize)> {
     let w = h.width as usize;
     let hh = h.height as usize;
     let depth = h.depth as usize;
@@ -82,13 +92,16 @@ pub fn decode_ascii(h: &Header, body: &[u8]) -> Result<DecodedSamples> {
         }
     }
 
-    Ok(DecodedSamples {
-        width: h.width,
-        height: h.height,
-        depth: h.depth,
-        maxval: h.maxval,
-        samples: out,
-    })
+    Ok((
+        DecodedSamples {
+            width: h.width,
+            height: h.height,
+            depth: h.depth,
+            maxval: h.maxval,
+            samples: out,
+        },
+        cursor,
+    ))
 }
 
 /// Encode a P1/P2/P3 ASCII body. Always emits one sample per line for

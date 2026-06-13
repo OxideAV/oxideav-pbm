@@ -105,6 +105,33 @@ counterpart, so the framework codec/container path advertises no pixel
 format for them — they are reachable through the standalone API and the
 crate-local `PbmImage` model.
 
+## Multi-image streams
+
+A single Netpbm/PAM/PFM file may carry a **sequence of concatenated
+images** — each a self-describing magic + header + body, packed
+back-to-back. [`decode_pbm`] returns only the first image (trailing
+images are ignored); [`decode_pbm_multi`] walks every image in stream
+order:
+
+```rust
+let imgs = oxideav_pbm::decode_pbm_multi(&stream)?;   // Vec<(PbmImage, PbmPixelFormat)>
+for (img, fmt) in &imgs { /* ... */ }
+```
+
+Each image's on-disk length is resolved exactly: the binary
+(`P4`/`P5`/`P6`/`P7`) and Portable FloatMap (`Pf`/`PF`) bodies are
+deterministic from the dimensions, depth, and bits-per-sample, while
+the ASCII (`P1`/`P2`/`P3`) bodies report the tokenizer's consumed
+cursor (the byte after the final sample token). A stream therefore
+decodes correctly even when it interleaves ASCII and binary magics.
+[`decode_pbm_consumed`] exposes that per-image byte count directly for
+callers that want to drive the walk themselves. Inter-image ASCII
+whitespace is skipped before the next magic; because the magic must be
+the first two bytes of each image, a `#` comment is *not* a valid
+inter-image separator and surfaces a malformed-stream error. Trailing
+whitespace after the last image is accepted; trailing non-whitespace
+that does not begin a valid header is an error.
+
 ## PAM tuple-type handling
 
 The six standard `TUPLTYPE` names (`BLACKANDWHITE`, `GRAYSCALE`, `RGB`,
