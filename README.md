@@ -100,7 +100,15 @@ PFM reference).
 Dedicated entry points [`decode_pfm`] / [`encode_pfm`] expose the byte
 order and scale explicitly; [`decode_pbm`] / [`encode_pbm`] also handle
 `Pf` / `PF` automatically (encoding defaults to little-endian with a unit
-scale). The two float formats have no `oxideav_core::PixelFormat`
+scale). The Debevec reference describes the scale-line magnitude as "a
+scale factor … that an application may use to scale sample values", so it
+is advisory: the decoders never apply it automatically. Callers that *do*
+want the scaled linear-light values use the opt-in helpers
+[`apply_pfm_scale`] (multiply an existing `GrayF32` / `RgbF32` image's
+samples in place) or [`decode_pfm_scaled`] (decode and fold the header's
+factor into the samples in one call, still reporting the original factor
+in [`PfmHeaderInfo`]). Re-encoding a scaled image with a unit scale
+reproduces the same linear values. The two float formats have no `oxideav_core::PixelFormat`
 counterpart, so the framework codec/container path advertises no pixel
 format for them — they are reachable through the standalone API and the
 crate-local `PbmImage` model.

@@ -71,7 +71,9 @@ pub use header::{
     iter_pnm_header_comments, parse_header, Header, Magic, PfmInfo, PnmHeaderComments, Tupltype,
 };
 pub use image::{PbmImage, PbmPixelFormat, PbmPlane};
-pub use pfm::{decode_pfm, encode_pfm, encode_pfm_plane, PfmHeaderInfo};
+pub use pfm::{
+    apply_pfm_scale, decode_pfm, decode_pfm_scaled, encode_pfm, encode_pfm_plane, PfmHeaderInfo,
+};
 
 #[cfg(feature = "registry")]
 pub use registry::{

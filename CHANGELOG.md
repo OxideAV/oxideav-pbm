@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 305: opt-in Portable FloatMap scale-factor application. The
+  Debevec PFM reference (`docs/image/netpbm/pfm-portable-floatmap.md`)
+  describes the magnitude of the header's third line as "a scale factor
+  … that an application may use to scale sample values"; the decoders
+  preserve it as advisory metadata and never apply it automatically.
+  Two new public entry points let a caller perform that documented
+  multiply: `apply_pfm_scale(&mut PbmImage, scale)` multiplies every
+  IEEE-754 float sample of a `GrayF32` / `RgbF32` image in place
+  (rejecting non-float formats and non-finite factors, with a `1.0`
+  no-op fast path), and `decode_pfm_scaled(input)` decodes a `Pf` / `PF`
+  stream and folds the header's factor into the samples in one call
+  while still reporting the original factor in `PfmHeaderInfo::scale`.
+  Because the factor is folded in, re-encoding the scaled image with
+  `encode_pfm(.., 1.0)` reproduces the same linear values.
 - Round 299: a fifth cargo-fuzz target, `multi`, drives the multi-image
   stream walker (`decode_pbm_multi` / `decode_pbm_consumed`) on
   arbitrary bytes. The single-image `decode` target already covers the

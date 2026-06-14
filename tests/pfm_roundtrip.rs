@@ -2,7 +2,8 @@
 //! public crate API, including the unified `decode_pbm` dispatch path.
 
 use oxideav_pbm::{
-    decode_pbm, decode_pfm, encode_pbm, encode_pfm, PbmImage, PbmPixelFormat, PbmPlane,
+    apply_pfm_scale, decode_pbm, decode_pfm, decode_pfm_scaled, encode_pbm, encode_pfm, PbmImage,
+    PbmPixelFormat, PbmPlane,
 };
 
 /// Build a float image whose samples encode their coordinates so a row
@@ -84,6 +85,38 @@ fn encode_pbm_auto_selects_pfm_for_float_formats() {
     let rgb = float_image(3, 3, 3);
     assert!(encode_pbm(&gray).unwrap().starts_with(b"Pf\n"));
     assert!(encode_pbm(&rgb).unwrap().starts_with(b"PF\n"));
+}
+
+#[test]
+fn decode_pfm_scaled_folds_header_factor_into_samples() {
+    // The Debevec reference describes the scale-line magnitude as a
+    // factor an application may apply to the samples. The opt-in
+    // `decode_pfm_scaled` performs that multiply; plain `decode_pfm`
+    // leaves the raw samples and reports the factor as metadata.
+    let img = float_image(6, 4, 3);
+    let bytes = encode_pfm(&img, true, 5.0).unwrap();
+
+    let (raw, raw_info) = decode_pfm(&bytes).unwrap();
+    let (scaled, scaled_info) = decode_pfm_scaled(&bytes).unwrap();
+
+    // Both report the same advisory factor; only `scaled` applied it.
+    assert_eq!(raw_info.scale, 5.0);
+    assert_eq!(scaled_info.scale, 5.0);
+
+    for (rc, sc) in raw.planes[0]
+        .data
+        .chunks_exact(4)
+        .zip(scaled.planes[0].data.chunks_exact(4))
+    {
+        let r = f32::from_le_bytes([rc[0], rc[1], rc[2], rc[3]]);
+        let s = f32::from_le_bytes([sc[0], sc[1], sc[2], sc[3]]);
+        assert_eq!(s, r * 5.0);
+    }
+
+    // Applying the factor by hand to the raw decode matches the wrapper.
+    let mut by_hand = raw;
+    apply_pfm_scale(&mut by_hand, scaled_info.scale).unwrap();
+    assert_eq!(by_hand.planes[0].data, scaled.planes[0].data);
 }
 
 #[test]

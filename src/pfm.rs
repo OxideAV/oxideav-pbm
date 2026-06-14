@@ -123,6 +123,68 @@ pub(crate) fn decode_pfm_image(h: &Header, body: &[u8]) -> Result<(PbmImage, Pbm
     ))
 }
 
+/// Decode a Portable FloatMap and **apply** the header's scale factor to
+/// every sample, returning the scaled [`PbmImage`] plus the recovered
+/// [`PfmHeaderInfo`].
+///
+/// Per the Debevec PFM reference the absolute value of the third header
+/// line "serves as a scale factor … that an application may use to scale
+/// sample values." [`decode_pfm`] deliberately leaves that application to
+/// the caller (it preserves the factor as metadata and returns the raw
+/// samples unchanged); this convenience wrapper performs the documented
+/// multiply for callers that want the scaled linear-light values directly.
+///
+/// The returned [`PfmHeaderInfo::scale`] is still the header's original
+/// factor — it is reported, not reset to `1.0`, so a caller can tell the
+/// scaling has been applied and avoid double-applying it. Because the
+/// factor has already been multiplied in, re-encoding the returned image
+/// with [`encode_pfm`] and a scale of `1.0` reproduces the same linear
+/// values.
+pub fn decode_pfm_scaled(input: &[u8]) -> Result<(PbmImage, PfmHeaderInfo)> {
+    let (mut image, info) = decode_pfm(input)?;
+    apply_pfm_scale(&mut image, info.scale)?;
+    Ok((image, info))
+}
+
+/// Multiply every IEEE-754 float sample of a [`PbmPixelFormat::GrayF32`]
+/// or [`PbmPixelFormat::RgbF32`] image by `scale`, in place.
+///
+/// This is the documented PFM scale-factor application: the Debevec
+/// reference says the magnitude of the header's third line is "a scale
+/// factor … that an application may use to scale sample values." The
+/// crate's decoders never apply it automatically (the factor is advisory),
+/// so this helper lets a caller opt in. The samples are read and written
+/// in the plane's little-endian in-memory contract; the alpha-free float
+/// formats carry no channel that should be left unscaled, so every sample
+/// is multiplied.
+///
+/// `scale` must be finite (a `NaN` or `±inf` factor would poison the whole
+/// raster); a non-float pixel format is rejected. A `scale` of exactly
+/// `1.0` is a no-op fast path.
+pub fn apply_pfm_scale(image: &mut PbmImage, scale: f32) -> Result<()> {
+    match image.pixel_format {
+        PbmPixelFormat::GrayF32 | PbmPixelFormat::RgbF32 => {}
+        other => {
+            return Err(Error::unsupported(format!(
+                "PFM scale: pixel format {other:?} is not a float map"
+            )))
+        }
+    }
+    if !scale.is_finite() {
+        return Err(Error::invalid("PFM scale: factor must be finite"));
+    }
+    if scale == 1.0 {
+        return Ok(());
+    }
+    for plane in &mut image.planes {
+        for sample in plane.data.chunks_exact_mut(4) {
+            let v = f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
+            sample.copy_from_slice(&(v * scale).to_le_bytes());
+        }
+    }
+    Ok(())
+}
+
 /// Encode a [`PbmImage`] (whose pixel format must be
 /// [`PbmPixelFormat::GrayF32`] or [`PbmPixelFormat::RgbF32`]) as a
 /// Portable FloatMap. `little_endian` selects the on-disk byte order
@@ -401,6 +463,85 @@ mod tests {
         let img = float_image(1, 1, 1);
         assert!(encode_pfm(&img, true, 0.0).is_err());
         assert!(encode_pfm(&img, true, f32::INFINITY).is_err());
+    }
+
+    #[test]
+    fn apply_pfm_scale_multiplies_every_sample() {
+        let mut img = float_image(3, 2, 3);
+        // Snapshot the unscaled samples so we can compare against ×2.5.
+        let before: Vec<f32> = img.planes[0]
+            .data
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        apply_pfm_scale(&mut img, 2.5).unwrap();
+        for (i, c) in img.planes[0].data.chunks_exact(4).enumerate() {
+            let got = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            assert_eq!(got, before[i] * 2.5, "sample {i}");
+        }
+    }
+
+    #[test]
+    fn apply_pfm_scale_unit_is_noop() {
+        let mut img = float_image(2, 2, 1);
+        let original = img.planes[0].data.clone();
+        apply_pfm_scale(&mut img, 1.0).unwrap();
+        assert_eq!(img.planes[0].data, original);
+    }
+
+    #[test]
+    fn apply_pfm_scale_rejects_non_float_and_non_finite() {
+        let mut gray8 = PbmImage {
+            width: 1,
+            height: 1,
+            pixel_format: PbmPixelFormat::Gray8,
+            planes: vec![PbmPlane {
+                stride: 1,
+                data: vec![0u8],
+            }],
+            pts: None,
+        };
+        assert!(matches!(
+            apply_pfm_scale(&mut gray8, 2.0),
+            Err(Error::Unsupported(_))
+        ));
+        let mut img = float_image(1, 1, 1);
+        assert!(apply_pfm_scale(&mut img, f32::NAN).is_err());
+        assert!(apply_pfm_scale(&mut img, f32::INFINITY).is_err());
+    }
+
+    #[test]
+    fn decode_pfm_scaled_applies_header_factor() {
+        // Encode at scale 3.0 (big-endian), then decode-with-scale and
+        // confirm every sample is the raw value × 3.0 while the reported
+        // scale is still the header's original 3.0.
+        let img = float_image(4, 3, 1);
+        let bytes = encode_pfm(&img, false, 3.0).unwrap();
+        let (raw, _) = decode_pfm(&bytes).unwrap();
+        let (scaled, info) = decode_pfm_scaled(&bytes).unwrap();
+        assert_eq!(info.scale, 3.0);
+        for (rc, sc) in raw.planes[0]
+            .data
+            .chunks_exact(4)
+            .zip(scaled.planes[0].data.chunks_exact(4))
+        {
+            let r = f32::from_le_bytes([rc[0], rc[1], rc[2], rc[3]]);
+            let s = f32::from_le_bytes([sc[0], sc[1], sc[2], sc[3]]);
+            assert_eq!(s, r * 3.0);
+        }
+    }
+
+    #[test]
+    fn scaled_then_reencode_unit_reproduces_linear_values() {
+        // decode_pfm_scaled folds the factor into the samples, so
+        // re-encoding with scale 1.0 round-trips the scaled linear values.
+        let img = float_image(3, 3, 3);
+        let bytes = encode_pfm(&img, true, 2.0).unwrap();
+        let (scaled, _) = decode_pfm_scaled(&bytes).unwrap();
+        let reencoded = encode_pfm(&scaled, true, 1.0).unwrap();
+        let (back, info) = decode_pfm(&reencoded).unwrap();
+        assert_eq!(info.scale, 1.0);
+        assert_eq!(back.planes[0].data, scaled.planes[0].data);
     }
 
     #[test]
