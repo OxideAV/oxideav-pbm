@@ -157,7 +157,7 @@ either way.)
 
 ## Fuzzing
 
-A `fuzz/` cargo-fuzz workspace exercises four independent entry
+A `fuzz/` cargo-fuzz workspace exercises five independent entry
 points:
 
 * `decode` — full pipeline (`parse_header` → ASCII/binary body decoder
@@ -173,6 +173,20 @@ points:
   check, and the big-endian byte-swap kernel. The PFM parser is
   disjoint from the PNM/PAM tokenizer the `decode` / `header`
   harnesses cover, so the round-199 addition closes a coverage gap.
+* `multi` — multi-image stream walker (`decode_pbm_multi` /
+  `decode_pbm_consumed`). The single-image `decode` harness covers the
+  body decoders; this round-299 addition covers the distinct
+  byte-accounting layer on top of them — the loop that skips
+  inter-image whitespace and advances `offset += consumed` across
+  concatenated images, resolving each image's on-disk length
+  (deterministic for the binary/PFM magics, ASCII-tokenizer cursor for
+  P1/P2/P3) and guarding against a zero-consumed spin. The harness also
+  asserts the walker's load-bearing invariant — a successful decode
+  never reports `consumed > input.len()`, which would index the next
+  `&input[offset..]` re-slice out of bounds. 13.4M runs over a mixed
+  ASCII/binary/PFM corpus surfaced no panics; the corpus grew from the
+  3.3k single-image seeds to ~6.8k entries, confirming the walk reached
+  coverage the `decode` target never did.
 
 The harness uncovered one pre-allocation OOM during round 171 (a
 header claiming `width * height` in the billions triggered an

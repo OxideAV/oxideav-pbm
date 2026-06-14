@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 299: a fifth cargo-fuzz target, `multi`, drives the multi-image
+  stream walker (`decode_pbm_multi` / `decode_pbm_consumed`) on
+  arbitrary bytes. The single-image `decode` target already covers the
+  body decoders; `multi` covers the distinct byte-accounting layer on
+  top of them — the loop that skips inter-image whitespace and advances
+  `offset += consumed` across concatenated images, the per-image
+  on-disk-length resolution (deterministic for binary/PFM magics, ASCII
+  tokenizer cursor for P1/P2/P3), and the zero-consumed loop guard. The
+  harness also asserts the load-bearing invariant that a successful
+  decode never reports `consumed > input.len()`. 13.4M runs over a
+  mixed corpus found no panics; the corpus grew from the 3.3k
+  single-image seeds to ~6.8k entries, confirming new coverage.
 - Round 292: multi-image (concatenated) stream decoding. The
   PNM/PAM/PFM family permits a single file to carry a sequence of
   self-describing images packed back-to-back; the decoder previously

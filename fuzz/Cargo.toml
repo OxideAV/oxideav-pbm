@@ -96,3 +96,17 @@ name = "pfm"
 path = "fuzz_targets/pfm.rs"
 test = false
 doc = false
+
+# Multi-image stream walk — drives `decode_pbm_multi` /
+# `decode_pbm_consumed` on arbitrary bytes. Concatenated Netpbm/PAM/PFM
+# images are walked by a loop that skips inter-image whitespace and
+# advances `offset += consumed`; the unique surface is the per-image
+# byte-accounting (deterministic length for binary/PFM magics, ASCII
+# tokenizer cursor for P1/P2/P3) and the zero-consumed loop guard — none
+# of which the single-image `decode` harness reaches. The harness also
+# asserts the walker's core invariant: `consumed <= input.len()`.
+[[bin]]
+name = "multi"
+path = "fuzz_targets/multi.rs"
+test = false
+doc = false
