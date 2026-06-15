@@ -110,6 +110,26 @@ Each image's on-disk length is resolved exactly — deterministic for the
 binary/PFM bodies, the tokenizer cursor for ASCII bodies — so a stream
 decodes correctly even when it interleaves ASCII and binary magics.
 
+For a stream walker that needs the per-image header metadata — `MAXVAL`,
+`DEPTH`, the PAM `TUPLTYPE`, or (for `Pf` / `PF`) the byte order and
+scale — the metadata-carrying entries hand the fully parsed `Header`
+back alongside each image. [`decode_pbm_header_consumed`] is the
+single-image counterpart to [`decode_pbm_consumed`], and
+[`decode_pbm_multi_with_headers`] is the counterpart to
+[`decode_pbm_multi`]; both close the asymmetry the integer
+[`decode_pbm_consumed`] previously had against the PFM-only
+[`decode_pfm_consumed`] (which already surfaced byte order and scale via
+[`PfmHeaderInfo`]). For PFM inputs the returned header's `pfm` field
+carries the same byte order and scale.
+
+```rust
+let imgs = oxideav_pbm::decode_pbm_multi_with_headers(&stream)?;
+for (img, fmt, header) in &imgs {
+    // header.magic / header.maxval / header.depth / header.tupltype,
+    // and header.pfm for the Pf / PF magics.
+}
+```
+
 ## PAM tuple-type handling
 
 The six standard `TUPLTYPE` names (`BLACKANDWHITE`, `GRAYSCALE`, `RGB`,

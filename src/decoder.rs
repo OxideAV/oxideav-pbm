@@ -156,6 +156,46 @@ pub fn decode_pbm_multi(input: &[u8]) -> Result<Vec<(PbmImage, PbmPixelFormat)>>
     Ok(images)
 }
 
+/// Walk every image in a concatenated stream like [`decode_pbm_multi`],
+/// but keep each image's fully parsed [`Header`] — one
+/// `(PbmImage, PbmPixelFormat, Header)` per image in stream order.
+///
+/// The metadata-carrying counterpart to [`decode_pbm_multi`]: a caller
+/// driving a mixed-magic stream gets the per-image `MAXVAL`, `DEPTH`, PAM
+/// `TUPLTYPE`, and — for the `Pf` / `PF` magics — the byte order and scale
+/// (via [`Header::pfm`]) without re-parsing any header. The returned
+/// header's `data_offset` is relative to the start of that image, not to
+/// the stream.
+pub fn decode_pbm_multi_with_headers(
+    input: &[u8],
+) -> Result<Vec<(PbmImage, PbmPixelFormat, Header)>> {
+    let mut images = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        // Same inter-image whitespace skip as `decode_pbm_multi`: the
+        // magic must be the first two bytes of each image, so a `#` here
+        // is not a valid separator and falls through to `parse_header`,
+        // which reports the malformed stream.
+        while offset < input.len() && is_ascii_ws(input[offset]) {
+            offset += 1;
+        }
+        if offset >= input.len() {
+            break;
+        }
+        let (image, fmt, header, consumed) = decode_pbm_header_consumed(&input[offset..])?;
+        images.push((image, fmt, header));
+        debug_assert!(consumed > 0, "decode consumed zero bytes — would loop");
+        if consumed == 0 {
+            return Err(Error::invalid("Netpbm: image consumed zero bytes"));
+        }
+        offset += consumed;
+    }
+    if images.is_empty() {
+        return Err(Error::invalid("Netpbm: no images in stream"));
+    }
+    Ok(images)
+}
+
 #[inline]
 fn is_ascii_ws(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\r' | b'\n' | 0x0B | 0x0C)
@@ -165,7 +205,33 @@ fn is_ascii_ws(c: u8) -> bool {
 /// `input` it occupied (header + body, excluding any trailing inter-image
 /// whitespace). The byte count lets [`decode_pbm_multi`] locate the next
 /// concatenated image; single-image [`decode_pbm`] discards it.
+///
+/// This drops the parsed [`Header`]; use [`decode_pbm_header_consumed`]
+/// when a stream walker needs the per-image `MAXVAL` / `TUPLTYPE` / `DEPTH`
+/// metadata (the integer-format counterpart to the byte order + scale that
+/// [`crate::decode_pfm_consumed`] surfaces for PFM).
 pub fn decode_pbm_consumed(input: &[u8]) -> Result<(PbmImage, PbmPixelFormat, usize)> {
+    decode_pbm_header_consumed(input).map(|(image, fmt, _header, consumed)| (image, fmt, consumed))
+}
+
+/// Decode the first image in `input` and return the fully parsed
+/// [`Header`] alongside the image, its [`PbmPixelFormat`], and the exact
+/// on-disk byte count (header + body, excluding any trailing inter-image
+/// whitespace).
+///
+/// This is the metadata-carrying counterpart to [`decode_pbm_consumed`]:
+/// where that entry discards the header once decoding is done, this one
+/// hands it back so a caller walking a concatenated stream can recover the
+/// per-image `MAXVAL`, `DEPTH`, and PAM `TUPLTYPE` (and the `data_offset`
+/// of the body within `input`). It mirrors what
+/// [`crate::decode_pfm_consumed`] already does for the Portable FloatMap
+/// magics via [`crate::PfmHeaderInfo`] — for PFM inputs the returned
+/// header's [`Header::pfm`] field carries the byte order and scale.
+/// [`decode_pbm_multi_with_headers`] builds on this to walk an entire
+/// stream while keeping every image's header.
+pub fn decode_pbm_header_consumed(
+    input: &[u8],
+) -> Result<(PbmImage, PbmPixelFormat, Header, usize)> {
     let header = parse_header(input)?;
     let body = &input[header.data_offset..];
     // Portable FloatMap has a wholly different (float, bottom-to-top,
@@ -173,7 +239,8 @@ pub fn decode_pbm_consumed(input: &[u8]) -> Result<(PbmImage, PbmPixelFormat, us
     if header.magic.is_pfm() {
         let (image, fmt) = crate::pfm::decode_pfm_image(&header, body)?;
         let body_len = pfm_body_byte_len(&header)?;
-        return Ok((image, fmt, header.data_offset + body_len));
+        let consumed = header.data_offset + body_len;
+        return Ok((image, fmt, header, consumed));
     }
     // P4 → `MonoBlack` fast path. The wire format (MSB-first packed
     // bits, rows padded to a byte boundary, `1 = black`) is byte-for-byte
@@ -188,7 +255,8 @@ pub fn decode_pbm_consumed(input: &[u8]) -> Result<(PbmImage, PbmPixelFormat, us
     if matches!(header.magic, Magic::P4BinaryBitmap) {
         let (image, fmt) = decode_p4_monoblack(&header, body)?;
         let body_len = binary_body_byte_len(&header)?;
-        return Ok((image, fmt, header.data_offset + body_len));
+        let consumed = header.data_offset + body_len;
+        return Ok((image, fmt, header, consumed));
     }
     // Binary 8-bit (maxval=255) and 16-bit (maxval=65535) hot path. When
     // the wire sample layout matches the plane byte layout — P5 / P6 /
@@ -203,7 +271,8 @@ pub fn decode_pbm_consumed(input: &[u8]) -> Result<(PbmImage, PbmPixelFormat, us
     // memcpy rewrites.
     if let Some((image, fmt)) = try_decode_binary_bytewise(&header, body)? {
         let body_len = binary_body_byte_len(&header)?;
-        return Ok((image, fmt, header.data_offset + body_len));
+        let consumed = header.data_offset + body_len;
+        return Ok((image, fmt, header, consumed));
     }
     // ASCII bodies have no closed-form byte length (whitespace and
     // comment runs vary), so the tokenizer reports its consumed cursor;
@@ -216,6 +285,7 @@ pub fn decode_pbm_consumed(input: &[u8]) -> Result<(PbmImage, PbmPixelFormat, us
         (samples, binary_body_byte_len(&header)?)
     };
     let (plane, format) = samples_to_plane(&header, &samples)?;
+    let consumed = header.data_offset + body_len;
     Ok((
         PbmImage {
             width: header.width,
@@ -225,7 +295,8 @@ pub fn decode_pbm_consumed(input: &[u8]) -> Result<(PbmImage, PbmPixelFormat, us
             pts: None,
         },
         format,
-        header.data_offset + body_len,
+        header,
+        consumed,
     ))
 }
 

@@ -61,7 +61,10 @@ pub mod registry;
 /// the body itself is self-describing.
 pub const CODEC_ID_STR: &str = "pbm";
 
-pub use decoder::{decode_pbm, decode_pbm_consumed, decode_pbm_multi};
+pub use decoder::{
+    decode_pbm, decode_pbm_consumed, decode_pbm_header_consumed, decode_pbm_multi,
+    decode_pbm_multi_with_headers,
+};
 pub use encoder::{
     encode_pbm, encode_pbm_ascii, encode_pbm_ascii_plane, encode_pbm_plane, encode_pbm_with_format,
     PbmEncodeFormat,

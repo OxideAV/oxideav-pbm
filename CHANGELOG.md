@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 319: header-carrying stream-walk entry points
+  `decode_pbm_header_consumed(input) -> (PbmImage, PbmPixelFormat,
+  Header, usize)` and `decode_pbm_multi_with_headers(input) ->
+  Vec<(PbmImage, PbmPixelFormat, Header)>`. These are the integer-format
+  counterparts to the PFM-only `decode_pfm_consumed`: where the existing
+  `decode_pbm_consumed` / `decode_pbm_multi` discard the parsed header
+  once decoding finishes, the new entries hand the fully parsed `Header`
+  back so a caller walking a concatenated stream can recover each image's
+  `MAXVAL`, `DEPTH`, and PAM `TUPLTYPE` (and, for the `Pf` / `PF` magics,
+  the byte order and scale via `Header::pfm`) without re-parsing the
+  header bytes. The man pages (`pnm(5)` / `pam(5)`) describe a file as
+  carrying "one or more" self-describing images; this closes the
+  documented asymmetry whereby the integer `decode_pbm_consumed` dropped
+  the metadata the PFM path already surfaced via `PfmHeaderInfo`.
+  `decode_pbm_consumed` is now a thin wrapper that drops the header.
+
 - Round 313: length-aware Portable FloatMap entry point
   `decode_pfm_consumed(input) -> (PbmImage, PfmHeaderInfo, usize)` — the
   PFM analogue of `decode_pbm_consumed`. The Debevec PFM reference
