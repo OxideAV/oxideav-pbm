@@ -45,11 +45,53 @@ pub struct PfmHeaderInfo {
 /// recovered [`PfmHeaderInfo`]. Errors if the input is not a `Pf` / `PF`
 /// stream.
 pub fn decode_pfm(input: &[u8]) -> Result<(PbmImage, PfmHeaderInfo)> {
+    decode_pfm_consumed(input).map(|(image, info, _consumed)| (image, info))
+}
+
+/// Decode the first Portable FloatMap image in `input` and additionally
+/// report how many bytes it occupied on disk — the header length plus the
+/// exact `width * height * channels * 4` IEEE-754 binary32 raster (per the
+/// "Raster (sample) layout" section of the Debevec PFM reference, which
+/// fixes the total raster size at `xres * yres * channels * 4` bytes).
+///
+/// This is the Portable FloatMap analogue of
+/// [`crate::decode_pbm_consumed`]: the returned `usize` lets a caller walk
+/// a stream of concatenated PFM images while keeping the rich
+/// [`PfmHeaderInfo`] (byte order + scale + channel count) for each image —
+/// information the integer-flavoured `decode_pbm_consumed` does not carry.
+/// Advance a cursor by the returned count to reach the next image's magic:
+///
+/// ```
+/// # use oxideav_pbm::{decode_pfm_consumed, encode_pfm, PbmImage, PbmPixelFormat, PbmPlane};
+/// # let img = PbmImage {
+/// #     width: 1, height: 1, pixel_format: PbmPixelFormat::GrayF32,
+/// #     planes: vec![PbmPlane { stride: 4, data: 1.0f32.to_le_bytes().to_vec() }],
+/// #     pts: None,
+/// # };
+/// let mut stream = encode_pfm(&img, true, 1.0).unwrap();
+/// stream.extend(encode_pfm(&img, false, 2.0).unwrap());
+/// let mut off = 0;
+/// while off < stream.len() {
+///     let (_image, info, consumed) = decode_pfm_consumed(&stream[off..]).unwrap();
+///     println!("scale={} le={}", info.scale, info.little_endian);
+///     off += consumed;
+/// }
+/// ```
+pub fn decode_pfm_consumed(input: &[u8]) -> Result<(PbmImage, PfmHeaderInfo, usize)> {
     let header = parse_header(input)?;
     let info = header
         .pfm
         .ok_or_else(|| Error::invalid("PFM: input is not a Portable FloatMap (Pf/PF) stream"))?;
-    let (image, _fmt) = decode_pfm_image(&header, &input[header.data_offset..])?;
+    let body = &input[header.data_offset..];
+    let (image, _fmt) = decode_pfm_image(&header, body)?;
+    // On-disk raster size is exactly width * height * channels * 4 bytes;
+    // decode_pfm_image already validated that `body` holds at least this
+    // many bytes, so the multiply cannot overflow past what was indexed.
+    let body_len = (header.width as usize)
+        .checked_mul(header.height as usize)
+        .and_then(|v| v.checked_mul(header.depth as usize))
+        .and_then(|v| v.checked_mul(4))
+        .ok_or_else(|| Error::invalid("PFM: raster-size overflow"))?;
     Ok((
         image,
         PfmHeaderInfo {
@@ -57,6 +99,7 @@ pub fn decode_pfm(input: &[u8]) -> Result<(PbmImage, PfmHeaderInfo)> {
             scale: info.scale,
             channels: header.depth,
         },
+        header.data_offset + body_len,
     ))
 }
 
@@ -542,6 +585,86 @@ mod tests {
         let (back, info) = decode_pfm(&reencoded).unwrap();
         assert_eq!(info.scale, 1.0);
         assert_eq!(back.planes[0].data, scaled.planes[0].data);
+    }
+
+    #[test]
+    fn consumed_count_is_header_plus_raster() {
+        // A 5×4 grayscale PFM: raster = 5*4*1*4 = 80 bytes; the consumed
+        // count must be the header length + 80, i.e. the whole encoding.
+        let img = float_image(5, 4, 1);
+        let bytes = encode_pfm(&img, true, 1.0).unwrap();
+        let (_image, info, consumed) = decode_pfm_consumed(&bytes).unwrap();
+        assert_eq!(consumed, bytes.len());
+        assert_eq!(consumed - 80, b"Pf\n5 4\n-1.0\n".len());
+        assert_eq!(info.channels, 1);
+    }
+
+    #[test]
+    fn consumed_count_rgb_accounts_for_three_channels() {
+        let img = float_image(3, 2, 3);
+        let bytes = encode_pfm(&img, false, 1.0).unwrap();
+        let (_image, info, consumed) = decode_pfm_consumed(&bytes).unwrap();
+        // Raster = 3*2*3*4 = 72 bytes.
+        assert_eq!(consumed, bytes.len());
+        assert_eq!(consumed - 72, b"PF\n3 2\n1.0\n".len());
+        assert_eq!(info.channels, 3);
+    }
+
+    #[test]
+    fn consumed_walks_concatenated_pfm_stream_preserving_metadata() {
+        // Pack two distinct PFM images back to back (different byte order,
+        // scale, channels and size) and walk them by cursor, confirming
+        // each image's PfmHeaderInfo survives the walk.
+        let a = float_image(4, 3, 1);
+        let b = float_image(2, 2, 3);
+        let mut stream = encode_pfm(&a, true, 1.0).unwrap();
+        stream.extend(encode_pfm(&b, false, 2.5).unwrap());
+
+        let mut off = 0;
+        let mut seen = Vec::new();
+        while off < stream.len() {
+            let (image, info, consumed) = decode_pfm_consumed(&stream[off..]).unwrap();
+            assert!(consumed > 0);
+            seen.push((info, image.width, image.height, image.pixel_format));
+            off += consumed;
+        }
+        assert_eq!(off, stream.len());
+        assert_eq!(seen.len(), 2);
+
+        let (info0, w0, h0, fmt0) = seen[0];
+        assert!(info0.little_endian);
+        assert_eq!(info0.scale, 1.0);
+        assert_eq!(info0.channels, 1);
+        assert_eq!((w0, h0), (4, 3));
+        assert_eq!(fmt0, PbmPixelFormat::GrayF32);
+
+        let (info1, w1, h1, fmt1) = seen[1];
+        assert!(!info1.little_endian);
+        assert_eq!(info1.scale, 2.5);
+        assert_eq!(info1.channels, 3);
+        assert_eq!((w1, h1), (2, 2));
+        assert_eq!(fmt1, PbmPixelFormat::RgbF32);
+    }
+
+    #[test]
+    fn consumed_matches_decode_pfm_image_bytes() {
+        // The pixels recovered by decode_pfm_consumed must equal those from
+        // the plain decode_pfm path — only the extra byte count differs.
+        let img = float_image(6, 5, 3);
+        let bytes = encode_pfm(&img, false, 3.0).unwrap();
+        let (plain, plain_info) = decode_pfm(&bytes).unwrap();
+        let (rich, rich_info, consumed) = decode_pfm_consumed(&bytes).unwrap();
+        assert_eq!(plain.planes[0].data, rich.planes[0].data);
+        assert_eq!(plain_info, rich_info);
+        assert_eq!(consumed, bytes.len());
+    }
+
+    #[test]
+    fn consumed_rejects_non_pfm_input() {
+        // A P5 (binary PGM) header is a valid Netpbm magic but not PFM, so
+        // the PFM-specific entry must reject it rather than mis-walk it.
+        let buf = b"P5\n2 2\n255\n\x00\x01\x02\x03";
+        assert!(decode_pfm_consumed(buf).is_err());
     }
 
     #[test]

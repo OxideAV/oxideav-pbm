@@ -80,7 +80,12 @@ grayscale, three interleaved R/G/B for `PF` colour).
 
 Dedicated [`decode_pfm`] / [`encode_pfm`] entry points expose byte order
 and scale explicitly; [`decode_pbm`] / [`encode_pbm`] also handle
-`Pf` / `PF` automatically. The scale factor is advisory and never
+`Pf` / `PF` automatically. [`decode_pfm_consumed`] is the length-aware
+variant — it returns the exact on-disk byte count (header plus the
+`width × height × channels × 4` raster) alongside the image and
+[`PfmHeaderInfo`], so a caller can walk a stream of concatenated PFM
+images while keeping each image's byte order and scale (which the
+integer-flavoured [`decode_pbm_consumed`] does not carry). The scale factor is advisory and never
 applied automatically; opt-in helpers [`apply_pfm_scale`] and
 [`decode_pfm_scaled`] fold it into the samples on request. The two float
 formats have no `oxideav_core::PixelFormat` counterpart, so the

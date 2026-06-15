@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 313: length-aware Portable FloatMap entry point
+  `decode_pfm_consumed(input) -> (PbmImage, PfmHeaderInfo, usize)` — the
+  PFM analogue of `decode_pbm_consumed`. The Debevec PFM reference
+  (`docs/image/netpbm/pfm-portable-floatmap.md`, "Raster (sample)
+  layout") fixes the total raster size at `xres * yres * channels * 4`
+  bytes, so the on-disk length of a PFM image is exactly its header
+  length plus that raster. The new entry returns that byte count
+  alongside the decoded image, letting a caller walk a stream of
+  concatenated PFM images while keeping the per-image byte order, scale
+  and channel metadata in `PfmHeaderInfo` (which the integer-flavoured
+  `decode_pbm_consumed` does not carry). `decode_pfm` is now a thin
+  wrapper that drops the count.
+
 - Round 305: opt-in Portable FloatMap scale-factor application. The
   Debevec PFM reference (`docs/image/netpbm/pfm-portable-floatmap.md`)
   describes the magnitude of the header's third line as "a scale factor
