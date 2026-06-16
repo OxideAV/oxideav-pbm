@@ -228,6 +228,92 @@ pub fn apply_pfm_scale(image: &mut PbmImage, scale: f32) -> Result<()> {
     Ok(())
 }
 
+/// Divide every IEEE-754 float sample of a [`PbmPixelFormat::GrayF32`]
+/// or [`PbmPixelFormat::RgbF32`] image by `scale`, in place — the inverse
+/// of [`apply_pfm_scale`].
+///
+/// This is the encode-side companion to the documented PFM scale factor.
+/// The Debevec reference says the magnitude of the header's third line is
+/// "a scale factor … that an application may use to scale sample values",
+/// and [`apply_pfm_scale`] performs that read-side multiply
+/// (stored × scale ⇒ linear). To *store* linear values `L` under a chosen
+/// factor `s` so that a reader applying the factor recovers `L`, the
+/// writer must persist `L / s`; this helper performs that division so the
+/// pair `apply_inverse_pfm_scale(.., s)` then `apply_pfm_scale(.., s)`
+/// round-trips a sample back to itself (within `f32` precision).
+///
+/// Like [`apply_pfm_scale`], `scale` must be finite and a non-float pixel
+/// format is rejected. `scale` must additionally be non-zero (division by
+/// zero would poison the raster), matching what [`encode_pfm`] will write.
+/// A `scale` of exactly `1.0` is a no-op fast path.
+pub fn apply_inverse_pfm_scale(image: &mut PbmImage, scale: f32) -> Result<()> {
+    match image.pixel_format {
+        PbmPixelFormat::GrayF32 | PbmPixelFormat::RgbF32 => {}
+        other => {
+            return Err(Error::unsupported(format!(
+                "PFM inverse scale: pixel format {other:?} is not a float map"
+            )))
+        }
+    }
+    if !scale.is_finite() {
+        return Err(Error::invalid("PFM inverse scale: factor must be finite"));
+    }
+    if scale == 0.0 {
+        return Err(Error::invalid("PFM inverse scale: factor must be non-zero"));
+    }
+    if scale == 1.0 {
+        return Ok(());
+    }
+    for plane in &mut image.planes {
+        for sample in plane.data.chunks_exact_mut(4) {
+            let v = f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
+            sample.copy_from_slice(&(v / scale).to_le_bytes());
+        }
+    }
+    Ok(())
+}
+
+/// Encode a [`PbmImage`] of linear-light float samples as a Portable
+/// FloatMap **carrying** the chosen `scale` factor, dividing the samples
+/// by it on the way to disk.
+///
+/// This is the scale-folding counterpart to [`decode_pfm_scaled`]. Where
+/// [`encode_pfm`] writes the raw samples verbatim and records `scale` only
+/// as advisory metadata, this entry treats the input samples as the
+/// already-scaled linear values `L` and stores `L / scale`, so that a
+/// reader which applies the factor — [`decode_pfm_scaled`], or
+/// [`decode_pfm`] followed by [`apply_pfm_scale`] with the recovered
+/// factor — reproduces the original `L` (within `f32` precision). A
+/// `scale` of `1.0` is identical to [`encode_pfm`].
+///
+/// The input image is not mutated: the division happens on an internal
+/// copy of each plane. `little_endian` selects the on-disk byte order and
+/// the sign of the scale line exactly as in [`encode_pfm`]; `scale` must
+/// be finite and non-zero.
+pub fn encode_pfm_scaled(image: &PbmImage, little_endian: bool, scale: f32) -> Result<Vec<u8>> {
+    match image.pixel_format {
+        PbmPixelFormat::GrayF32 | PbmPixelFormat::RgbF32 => {}
+        other => {
+            return Err(Error::unsupported(format!(
+                "PFM encoder: pixel format {other:?} is not a float map"
+            )))
+        }
+    }
+    if !scale.is_finite() || scale == 0.0 {
+        return Err(Error::invalid(
+            "PFM encoder: scale must be finite and non-zero",
+        ));
+    }
+    // Fold the factor out of the linear samples on an owned copy so the
+    // caller's image is left untouched, then emit with the same factor in
+    // the header. `apply_inverse_pfm_scale` validates the (already-checked)
+    // format/scale again, which is cheap; the `1.0` no-op fast path makes
+    // the unit-scale case a plain clone + `encode_pfm`.
+    let mut scaled = image.clone();
+    apply_inverse_pfm_scale(&mut scaled, scale)?;
+    encode_pfm(&scaled, little_endian, scale)
+}
+
 /// Encode a [`PbmImage`] (whose pixel format must be
 /// [`PbmPixelFormat::GrayF32`] or [`PbmPixelFormat::RgbF32`]) as a
 /// Portable FloatMap. `little_endian` selects the on-disk byte order
@@ -551,6 +637,140 @@ mod tests {
         let mut img = float_image(1, 1, 1);
         assert!(apply_pfm_scale(&mut img, f32::NAN).is_err());
         assert!(apply_pfm_scale(&mut img, f32::INFINITY).is_err());
+    }
+
+    #[test]
+    fn apply_inverse_pfm_scale_divides_every_sample() {
+        let mut img = float_image(3, 2, 3);
+        let before: Vec<f32> = img.planes[0]
+            .data
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        apply_inverse_pfm_scale(&mut img, 2.5).unwrap();
+        for (i, c) in img.planes[0].data.chunks_exact(4).enumerate() {
+            let got = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            assert_eq!(got, before[i] / 2.5, "sample {i}");
+        }
+    }
+
+    #[test]
+    fn apply_inverse_pfm_scale_unit_is_noop() {
+        let mut img = float_image(2, 2, 1);
+        let original = img.planes[0].data.clone();
+        apply_inverse_pfm_scale(&mut img, 1.0).unwrap();
+        assert_eq!(img.planes[0].data, original);
+    }
+
+    #[test]
+    fn apply_inverse_pfm_scale_rejects_non_float_zero_and_non_finite() {
+        let mut gray8 = PbmImage {
+            width: 1,
+            height: 1,
+            pixel_format: PbmPixelFormat::Gray8,
+            planes: vec![PbmPlane {
+                stride: 1,
+                data: vec![0u8],
+            }],
+            pts: None,
+        };
+        assert!(matches!(
+            apply_inverse_pfm_scale(&mut gray8, 2.0),
+            Err(Error::Unsupported(_))
+        ));
+        let mut img = float_image(1, 1, 1);
+        assert!(apply_inverse_pfm_scale(&mut img, f32::NAN).is_err());
+        assert!(apply_inverse_pfm_scale(&mut img, f32::INFINITY).is_err());
+        assert!(apply_inverse_pfm_scale(&mut img, 0.0).is_err());
+    }
+
+    #[test]
+    fn apply_inverse_then_apply_round_trips() {
+        // Dividing by a factor then multiplying by the same factor must
+        // return the original samples (the values were chosen so the
+        // /2.0 then *2.0 round-trip is exact in f32).
+        let mut img = float_image(4, 3, 3);
+        let original = img.planes[0].data.clone();
+        apply_inverse_pfm_scale(&mut img, 2.0).unwrap();
+        apply_pfm_scale(&mut img, 2.0).unwrap();
+        assert_eq!(img.planes[0].data, original);
+    }
+
+    #[test]
+    fn encode_pfm_scaled_unit_matches_plain_encode() {
+        // scale 1.0 must be byte-identical to encode_pfm(.., 1.0).
+        let img = float_image(5, 4, 3);
+        let plain = encode_pfm(&img, true, 1.0).unwrap();
+        let scaled = encode_pfm_scaled(&img, true, 1.0).unwrap();
+        assert_eq!(plain, scaled);
+    }
+
+    #[test]
+    fn encode_pfm_scaled_does_not_mutate_input() {
+        let img = float_image(3, 3, 1);
+        let snapshot = img.planes[0].data.clone();
+        let _ = encode_pfm_scaled(&img, false, 4.0).unwrap();
+        assert_eq!(img.planes[0].data, snapshot);
+    }
+
+    #[test]
+    fn encode_pfm_scaled_records_factor_in_header() {
+        let img = float_image(2, 2, 1);
+        let bytes = encode_pfm_scaled(&img, false, 2.0).unwrap();
+        // Big-endian => positive scale line.
+        assert!(bytes.starts_with(b"Pf\n2 2\n2.0\n"), "header sets factor");
+        let (_img, info) = decode_pfm(&bytes).unwrap();
+        assert_eq!(info.scale, 2.0);
+        assert!(!info.little_endian);
+    }
+
+    #[test]
+    fn encode_pfm_scaled_then_decode_scaled_recovers_linear_values() {
+        // The headline contract: treat the image samples as linear values
+        // L, store them folded by /scale, and confirm a reader that
+        // applies the factor recovers L (within f32 precision). A factor
+        // of 2.0 keeps the /2 then *2 round-trip exact for these samples.
+        let img = float_image(4, 3, 3);
+        let linear: Vec<f32> = img.planes[0]
+            .data
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let bytes = encode_pfm_scaled(&img, true, 2.0).unwrap();
+        // On disk the samples are L/2; reading-with-scale multiplies back.
+        let (raw, _) = decode_pfm(&bytes).unwrap();
+        for (i, c) in raw.planes[0].data.chunks_exact(4).enumerate() {
+            let stored = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            assert_eq!(stored, linear[i] / 2.0, "stored sample {i}");
+        }
+        let (scaled, info) = decode_pfm_scaled(&bytes).unwrap();
+        assert_eq!(info.scale, 2.0);
+        for (i, c) in scaled.planes[0].data.chunks_exact(4).enumerate() {
+            let recovered = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            assert_eq!(recovered, linear[i], "recovered linear sample {i}");
+        }
+    }
+
+    #[test]
+    fn encode_pfm_scaled_rejects_non_float_and_bad_scale() {
+        let gray8 = PbmImage {
+            width: 1,
+            height: 1,
+            pixel_format: PbmPixelFormat::Gray8,
+            planes: vec![PbmPlane {
+                stride: 1,
+                data: vec![0u8],
+            }],
+            pts: None,
+        };
+        assert!(matches!(
+            encode_pfm_scaled(&gray8, true, 1.0),
+            Err(Error::Unsupported(_))
+        ));
+        let img = float_image(1, 1, 1);
+        assert!(encode_pfm_scaled(&img, true, 0.0).is_err());
+        assert!(encode_pfm_scaled(&img, true, f32::INFINITY).is_err());
+        assert!(encode_pfm_scaled(&img, true, f32::NAN).is_err());
     }
 
     #[test]

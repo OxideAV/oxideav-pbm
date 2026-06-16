@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 326: encode-side Portable FloatMap scale-factor folding, the
+  symmetric counterpart to round 305's read-side application. The Debevec
+  PFM reference (`docs/image/netpbm/pfm-portable-floatmap.md`) describes
+  the magnitude of the header's third line as "a scale factor … that an
+  application may use to scale sample values"; round 305 added
+  `apply_pfm_scale` (stored × scale ⇒ linear) and `decode_pfm_scaled`,
+  but offered no way to *write* linear samples under a chosen factor. Two
+  new entry points close that gap: `apply_inverse_pfm_scale(&mut PbmImage,
+  scale)` divides every `GrayF32` / `RgbF32` sample by the factor (the
+  exact inverse of `apply_pfm_scale`, with the same float-format/finite
+  validation plus a non-zero guard and a `1.0` no-op fast path), and
+  `encode_pfm_scaled(image, little_endian, scale)` treats the image
+  samples as linear values `L`, stores `L / scale` on disk and records
+  the factor in the header, so a reader that applies it — `decode_pfm_scaled`
+  — reproduces `L` within `f32` precision. `encode_pfm_scaled` does not
+  mutate its input (it folds the factor out of an owned copy) and is
+  byte-identical to `encode_pfm` for a `scale` of `1.0`.
+
 - Round 319: header-carrying stream-walk entry points
   `decode_pbm_header_consumed(input) -> (PbmImage, PbmPixelFormat,
   Header, usize)` and `decode_pbm_multi_with_headers(input) ->

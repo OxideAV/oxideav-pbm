@@ -87,7 +87,13 @@ variant — it returns the exact on-disk byte count (header plus the
 images while keeping each image's byte order and scale (which the
 integer-flavoured [`decode_pbm_consumed`] does not carry). The scale factor is advisory and never
 applied automatically; opt-in helpers [`apply_pfm_scale`] and
-[`decode_pfm_scaled`] fold it into the samples on request. The two float
+[`decode_pfm_scaled`] fold it into the samples on request. The encode side
+mirrors this: [`apply_inverse_pfm_scale`] divides every sample by a factor
+(the exact inverse of [`apply_pfm_scale`]), and [`encode_pfm_scaled`]
+treats the image samples as linear values, stores them folded by the
+factor (`sample / scale`) and records the factor in the header — so a
+reader applying it (via [`decode_pfm_scaled`]) recovers the original
+linear values within `f32` precision. The two float
 formats have no `oxideav_core::PixelFormat` counterpart, so the
 framework codec/container path advertises no pixel format for them —
 they are reachable through the standalone API and the crate-local

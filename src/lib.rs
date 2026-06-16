@@ -75,8 +75,8 @@ pub use header::{
 };
 pub use image::{PbmImage, PbmPixelFormat, PbmPlane};
 pub use pfm::{
-    apply_pfm_scale, decode_pfm, decode_pfm_consumed, decode_pfm_scaled, encode_pfm,
-    encode_pfm_plane, PfmHeaderInfo,
+    apply_inverse_pfm_scale, apply_pfm_scale, decode_pfm, decode_pfm_consumed, decode_pfm_scaled,
+    encode_pfm, encode_pfm_plane, encode_pfm_scaled, PfmHeaderInfo,
 };
 
 #[cfg(feature = "registry")]
