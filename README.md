@@ -116,6 +116,12 @@ Each image's on-disk length is resolved exactly — deterministic for the
 binary/PFM bodies, the tokenizer cursor for ASCII bodies — so a stream
 decodes correctly even when it interleaves ASCII and binary magics.
 
+The framework `Decoder` trait path honours multi-image streams too: a
+single packet carrying a concatenated sequence decodes to one
+`receive_frame` result per image, drained in stream order (a one-image
+file yields exactly one frame, as before). Earlier the trait impl
+decoded only the first image and silently dropped the rest.
+
 For an all-PFM stream, [`decode_pfm_multi`] is the float-only counterpart
 to [`decode_pbm_multi`]: it hands back the dedicated [`PfmHeaderInfo`]
 (byte order + scale + channel count) for every image directly, rather than

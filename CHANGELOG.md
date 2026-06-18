@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Round 336: the framework `Decoder` trait impl (`PbmDecoder`, reachable
+  through the codec registry / container path) now decodes **every**
+  image in a multi-image packet, not just the first. The Netpbm/PAM/PFM
+  family permits a file to concatenate a sequence of self-describing
+  images (`pnm(5)` / `pam(5)` describe a file as carrying "one or more"
+  images), and the standalone `decode_pbm_multi` has always walked them
+  all — but `send_packet` routed through single-image `decode_pbm`, so a
+  multi-image stream decoded through the framework silently lost every
+  frame after the first. `send_packet` now decodes the whole packet via
+  `decode_pbm_multi` and queues each image as a `VideoFrame`;
+  `receive_frame` drains them front-to-back in stream order (a
+  single-image file still yields exactly one frame, and the
+  `NeedMore` -> `flush` -> `Eof` drain contract is unchanged). Closes the
+  documented asymmetry whereby the standalone and framework decode
+  surfaces disagreed on multi-image streams.
+
 ### Added
 
 - Round 331: PFM-only multi-image stream walker `decode_pfm_multi(input)

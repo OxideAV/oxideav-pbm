@@ -36,12 +36,14 @@ use oxideav_core::Decoder;
 use oxideav_core::{CodecId, CodecParameters, Frame, Packet, VideoFrame, VideoPlane};
 
 /// Factory registered with the codec registry. One packet per whole
-/// Netpbm file; one frame per packet.
+/// Netpbm file; one *or more* frames per packet — a single file may
+/// concatenate a sequence of self-describing images, each of which
+/// becomes a `receive_frame` result in stream order.
 #[cfg(feature = "registry")]
 pub fn make_decoder(_params: &CodecParameters) -> oxideav_core::Result<Box<dyn Decoder>> {
     Ok(Box::new(PbmDecoder {
         codec_id: CodecId::new(crate::CODEC_ID_STR),
-        pending: None,
+        pending: std::collections::VecDeque::new(),
         eof: false,
     }))
 }
@@ -49,7 +51,13 @@ pub fn make_decoder(_params: &CodecParameters) -> oxideav_core::Result<Box<dyn D
 #[cfg(feature = "registry")]
 struct PbmDecoder {
     codec_id: CodecId,
-    pending: Option<VideoFrame>,
+    /// Frames decoded from the most recent packet, in stream order,
+    /// awaiting `receive_frame`. A single Netpbm packet may carry a
+    /// *sequence* of concatenated images (`pnm(5)` / `pam(5)` describe a
+    /// file as holding "one or more" images), so one `send_packet` can
+    /// yield more than one frame; they are drained front-to-back. A
+    /// `VecDeque` makes the front-pop O(1).
+    pending: std::collections::VecDeque<VideoFrame>,
     eof: bool,
 }
 
@@ -59,12 +67,18 @@ impl Decoder for PbmDecoder {
         &self.codec_id
     }
     fn send_packet(&mut self, packet: &Packet) -> oxideav_core::Result<()> {
-        let (image, _fmt) = decode_pbm(&packet.data)?;
-        self.pending = Some(image_to_video_frame(image));
+        // Decode *every* image in the packet, not just the first. A
+        // Netpbm/PAM/PFM file may concatenate multiple self-describing
+        // images back-to-back; the standalone `decode_pbm_multi` walks
+        // them all, and the framework path must too — otherwise a
+        // multi-image stream silently loses every frame after the first.
+        for (image, _fmt) in decode_pbm_multi(&packet.data)? {
+            self.pending.push_back(image_to_video_frame(image));
+        }
         Ok(())
     }
     fn receive_frame(&mut self) -> oxideav_core::Result<Frame> {
-        match self.pending.take() {
+        match self.pending.pop_front() {
             Some(f) => Ok(Frame::Video(f)),
             None => {
                 if self.eof {
@@ -1257,5 +1271,83 @@ mod tests {
             crate::error::PbmError::InvalidData(_) => {}
             other => panic!("expected InvalidData, got {other:?}"),
         }
+    }
+
+    #[cfg(feature = "registry")]
+    #[test]
+    fn decoder_trait_emits_every_image_in_a_multi_image_packet() {
+        use oxideav_core::{Frame, Packet, TimeBase};
+
+        // Three concatenated PPM images of distinct sizes and pixels.
+        // The whole file is one packet (the container hands the demuxed
+        // bytes through unchanged); the decoder must surface all three
+        // frames in stream order — the pre-fix impl dropped #2 and #3.
+        let mut stream = Vec::new();
+        stream.extend_from_slice(b"P3\n2 1\n255\n255 0 0  0 255 0\n");
+        stream.extend_from_slice(b"P6\n1 1\n255\n\x01\x02\x03");
+        stream.extend_from_slice(b"P3\n1 2\n255\n10 20 30  40 50 60\n");
+
+        let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
+            .expect("decoder factory");
+
+        // Before any packet, receive_frame must signal NeedMore.
+        assert!(matches!(
+            dec.receive_frame(),
+            Err(oxideav_core::Error::NeedMore)
+        ));
+
+        let pkt = Packet::new(0, TimeBase::new(1, 1), stream);
+        dec.send_packet(&pkt).expect("send_packet");
+
+        // Drain all three frames; verify the first plane of each so we
+        // know they are distinct images decoded in order.
+        let f0 = match dec.receive_frame().unwrap() {
+            Frame::Video(v) => v,
+            other => panic!("expected video frame, got {other:?}"),
+        };
+        assert_eq!(f0.planes[0].data, [255, 0, 0, 0, 255, 0]);
+
+        let f1 = match dec.receive_frame().unwrap() {
+            Frame::Video(v) => v,
+            other => panic!("expected video frame, got {other:?}"),
+        };
+        assert_eq!(f1.planes[0].data, [1, 2, 3]);
+
+        let f2 = match dec.receive_frame().unwrap() {
+            Frame::Video(v) => v,
+            other => panic!("expected video frame, got {other:?}"),
+        };
+        assert_eq!(f2.planes[0].data, [10, 20, 30, 40, 50, 60]);
+
+        // Queue drained: NeedMore until flush, then Eof.
+        assert!(matches!(
+            dec.receive_frame(),
+            Err(oxideav_core::Error::NeedMore)
+        ));
+        dec.flush().unwrap();
+        assert!(matches!(dec.receive_frame(), Err(oxideav_core::Error::Eof)));
+    }
+
+    #[cfg(feature = "registry")]
+    #[test]
+    fn decoder_trait_single_image_packet_yields_one_frame() {
+        use oxideav_core::{Frame, Packet, TimeBase};
+
+        let mut dec = make_decoder(&CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)))
+            .expect("decoder factory");
+        let pkt = Packet::new(
+            0,
+            TimeBase::new(1, 1),
+            Vec::from(b"P6\n1 1\n255\n\x07\x08\x09".as_slice()),
+        );
+        dec.send_packet(&pkt).expect("send_packet");
+        match dec.receive_frame().unwrap() {
+            Frame::Video(v) => assert_eq!(v.planes[0].data, [7, 8, 9]),
+            other => panic!("expected video frame, got {other:?}"),
+        }
+        assert!(matches!(
+            dec.receive_frame(),
+            Err(oxideav_core::Error::NeedMore)
+        ));
     }
 }
