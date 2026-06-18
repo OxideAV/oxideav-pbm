@@ -116,6 +116,13 @@ Each image's on-disk length is resolved exactly — deterministic for the
 binary/PFM bodies, the tokenizer cursor for ASCII bodies — so a stream
 decodes correctly even when it interleaves ASCII and binary magics.
 
+For an all-PFM stream, [`decode_pfm_multi`] is the float-only counterpart
+to [`decode_pbm_multi`]: it hands back the dedicated [`PfmHeaderInfo`]
+(byte order + scale + channel count) for every image directly, rather than
+the integer-flavoured `Header` (where PFM metadata is only reachable via
+`Header::pfm`). It rejects any non-PFM magic in the stream, since its whole
+purpose is to surface that struct per image.
+
 For a stream walker that needs the per-image header metadata — `MAXVAL`,
 `DEPTH`, the PAM `TUPLTYPE`, or (for `Pf` / `PF`) the byte order and
 scale — the metadata-carrying entries hand the fully parsed `Header`

@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 331: PFM-only multi-image stream walker `decode_pfm_multi(input)
+  -> Vec<(PbmImage, PfmHeaderInfo)>`. This is the float counterpart to
+  `decode_pbm_multi`: where the integer walker surfaces per-image metadata
+  as the generic `Header` (with byte order + scale reachable only via
+  `Header::pfm`), the new entry returns the dedicated `PfmHeaderInfo`
+  (little-endianness, advisory scale factor, channel count) directly for
+  every image — the same rich struct the single-image `decode_pfm` /
+  `decode_pfm_consumed` entries return. Built on `decode_pfm_consumed`
+  exactly as `decode_pbm_multi` is built on `decode_pbm_consumed`, closing
+  the last asymmetry between the integer and float stream-walk surfaces.
+  Each image is consumed exactly (three-line header plus the
+  `width * height * channels * 4` raster per the Debevec PFM reference,
+  `docs/image/netpbm/pfm-portable-floatmap.md` "Raster (sample) layout");
+  ASCII whitespace between concatenated images is skipped, matching
+  `decode_pbm_multi`. A non-PFM magic anywhere in the stream is rejected,
+  since the entry's purpose is the PFM-specific `PfmHeaderInfo`.
+
 - Round 326: encode-side Portable FloatMap scale-factor folding, the
   symmetric counterpart to round 305's read-side application. The Debevec
   PFM reference (`docs/image/netpbm/pfm-portable-floatmap.md`) describes

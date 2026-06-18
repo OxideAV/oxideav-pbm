@@ -103,6 +103,85 @@ pub fn decode_pfm_consumed(input: &[u8]) -> Result<(PbmImage, PfmHeaderInfo, usi
     ))
 }
 
+/// Walk every Portable FloatMap image in a concatenated `Pf` / `PF`
+/// stream, returning one `(PbmImage, PfmHeaderInfo)` per image in stream
+/// order.
+///
+/// This is the PFM-only counterpart to [`crate::decode_pbm_multi`]: where
+/// the integer-flavoured walker surfaces each image's metadata as the
+/// generic [`crate::Header`] (with byte order + scale reachable only via
+/// [`crate::Header::pfm`]), this entry hands back the dedicated
+/// [`PfmHeaderInfo`] — little-endianness, the advisory scale factor, and
+/// the channel count — directly for every image, the same rich struct the
+/// single-image [`decode_pfm`] / [`decode_pfm_consumed`] entries return.
+/// It is built on [`decode_pfm_consumed`] exactly as [`crate::decode_pbm_multi`]
+/// is built on [`crate::decode_pbm_consumed`], closing the last asymmetry
+/// between the integer and float stream-walk surfaces.
+///
+/// Every image in `input` **must** be a Portable FloatMap: a non-PFM magic
+/// (a `P1`…`P7` header) is rejected, since this entry's whole purpose is the
+/// PFM-specific [`PfmHeaderInfo`]. Use [`crate::decode_pbm_multi`] /
+/// [`crate::decode_pbm_multi_with_headers`] for mixed or integer-format
+/// streams.
+///
+/// Bytes are consumed exactly: each image occupies its three-line header
+/// plus the deterministic `width * height * channels * 4` raster (per the
+/// "Raster (sample) layout" section of the Debevec PFM reference). The
+/// Portable FloatMap header itself admits no comments and no inter-line
+/// padding, but ASCII whitespace **between** concatenated images is skipped
+/// before the next magic is read — matching [`crate::decode_pbm_multi`].
+/// A single image yields a one-element `Vec`; an empty or
+/// whitespace-only input is reported as a malformed stream.
+///
+/// ```
+/// # use oxideav_pbm::{decode_pfm_multi, encode_pfm, PbmImage, PbmPixelFormat, PbmPlane};
+/// # let img = PbmImage {
+/// #     width: 1, height: 1, pixel_format: PbmPixelFormat::GrayF32,
+/// #     planes: vec![PbmPlane { stride: 4, data: 1.0f32.to_le_bytes().to_vec() }],
+/// #     pts: None,
+/// # };
+/// let mut stream = encode_pfm(&img, true, 1.0).unwrap();
+/// stream.extend(encode_pfm(&img, false, 2.0).unwrap());
+/// let images = decode_pfm_multi(&stream).unwrap();
+/// assert_eq!(images.len(), 2);
+/// assert!(images[0].1.little_endian && images[0].1.scale == 1.0);
+/// assert!(!images[1].1.little_endian && images[1].1.scale == 2.0);
+/// ```
+pub fn decode_pfm_multi(input: &[u8]) -> Result<Vec<(PbmImage, PfmHeaderInfo)>> {
+    let mut images = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        // Skip inter-image ASCII whitespace, mirroring `decode_pbm_multi`.
+        // The PFM magic must be the first two bytes of each image, so a
+        // stray `#` here is not a valid separator: it falls through to
+        // `decode_pfm_consumed` → `parse_header`, which reports the
+        // malformed stream rather than swallowing it.
+        while offset < input.len() && is_pfm_inter_image_ws(input[offset]) {
+            offset += 1;
+        }
+        if offset >= input.len() {
+            break;
+        }
+        let (image, info, consumed) = decode_pfm_consumed(&input[offset..])?;
+        images.push((image, info));
+        debug_assert!(consumed > 0, "PFM decode consumed zero bytes — would loop");
+        if consumed == 0 {
+            // Defence-in-depth: never spin forever on a degenerate header.
+            return Err(Error::invalid("PFM: image consumed zero bytes"));
+        }
+        offset += consumed;
+    }
+    if images.is_empty() {
+        return Err(Error::invalid("PFM: no images in stream"));
+    }
+    Ok(images)
+}
+
+#[inline]
+fn is_pfm_inter_image_ws(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\r' | b'\n' | 0x0B | 0x0C)
+}
+
 /// Decode the raw float body of an already-parsed PFM [`Header`]. `body`
 /// starts at `header.data_offset`. Shared by [`decode_pfm`] and the
 /// unified [`crate::decode_pbm`] entry point.
@@ -864,6 +943,78 @@ mod tests {
         assert_eq!(info1.channels, 3);
         assert_eq!((w1, h1), (2, 2));
         assert_eq!(fmt1, PbmPixelFormat::RgbF32);
+    }
+
+    #[test]
+    fn multi_walks_concatenated_stream_in_one_call() {
+        // decode_pfm_multi returns the same per-image (PbmImage, PfmHeaderInfo)
+        // sequence the by-hand decode_pfm_consumed cursor produces.
+        let a = float_image(4, 3, 1);
+        let b = float_image(2, 2, 3);
+        let mut stream = encode_pfm(&a, true, 1.0).unwrap();
+        stream.extend(encode_pfm(&b, false, 2.5).unwrap());
+
+        let images = decode_pfm_multi(&stream).unwrap();
+        assert_eq!(images.len(), 2);
+
+        let (img0, info0) = &images[0];
+        assert!(info0.little_endian);
+        assert_eq!(info0.scale, 1.0);
+        assert_eq!(info0.channels, 1);
+        assert_eq!((img0.width, img0.height), (4, 3));
+        assert_eq!(img0.pixel_format, PbmPixelFormat::GrayF32);
+
+        let (img1, info1) = &images[1];
+        assert!(!info1.little_endian);
+        assert_eq!(info1.scale, 2.5);
+        assert_eq!(info1.channels, 3);
+        assert_eq!((img1.width, img1.height), (2, 2));
+        assert_eq!(img1.pixel_format, PbmPixelFormat::RgbF32);
+    }
+
+    #[test]
+    fn multi_single_image_yields_one_element() {
+        let img = float_image(5, 4, 3);
+        let bytes = encode_pfm(&img, false, 1.0).unwrap();
+        let images = decode_pfm_multi(&bytes).unwrap();
+        assert_eq!(images.len(), 1);
+        let (only, info) = &images[0];
+        let (plain, plain_info) = decode_pfm(&bytes).unwrap();
+        assert_eq!(only.planes[0].data, plain.planes[0].data);
+        assert_eq!(*info, plain_info);
+    }
+
+    #[test]
+    fn multi_skips_inter_image_whitespace() {
+        // ASCII whitespace between two images is skipped, mirroring
+        // decode_pbm_multi; the trailing newline after the last raster is
+        // tolerated rather than reported as a malformed trailing stream.
+        let a = float_image(2, 2, 1);
+        let b = float_image(1, 1, 3);
+        let mut stream = encode_pfm(&a, true, 1.0).unwrap();
+        stream.extend_from_slice(b"\n \t");
+        stream.extend(encode_pfm(&b, true, 1.0).unwrap());
+        stream.push(b'\n');
+        let images = decode_pfm_multi(&stream).unwrap();
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[1].1.channels, 3);
+    }
+
+    #[test]
+    fn multi_rejects_empty_and_whitespace_only() {
+        assert!(decode_pfm_multi(b"").is_err());
+        assert!(decode_pfm_multi(b"   \n\t").is_err());
+    }
+
+    #[test]
+    fn multi_rejects_non_pfm_magic_in_stream() {
+        // A valid leading PFM image followed by a P5 (non-PFM) image must
+        // surface the malformed-stream error, not silently stop early — the
+        // PFM-specific entry promises a PfmHeaderInfo for every image.
+        let a = float_image(2, 2, 1);
+        let mut stream = encode_pfm(&a, true, 1.0).unwrap();
+        stream.extend_from_slice(b"P5\n2 2\n255\n\x00\x01\x02\x03");
+        assert!(decode_pfm_multi(&stream).is_err());
     }
 
     #[test]
