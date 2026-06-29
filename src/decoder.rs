@@ -320,37 +320,29 @@ pub fn decode_pbm_header_consumed(
 /// binary decode path performs before allocating, so a stream walked by
 /// [`decode_pbm_multi`] lands exactly on the next image's magic.
 fn binary_body_byte_len(h: &Header) -> Result<usize> {
-    let w = h.width as usize;
-    let hh = h.height as usize;
-    let depth = h.depth as usize;
-    match h.magic {
-        Magic::P4BinaryBitmap => w
-            .div_ceil(8)
-            .checked_mul(hh)
-            .ok_or_else(|| Error::invalid("Netpbm: dimension overflow")),
-        Magic::P5BinaryGraymap | Magic::P6BinaryPixmap | Magic::P7Pam => {
-            let bytes_per_sample = if h.bits_per_sample() == 16 { 2 } else { 1 };
-            w.checked_mul(hh)
-                .and_then(|v| v.checked_mul(depth))
-                .and_then(|v| v.checked_mul(bytes_per_sample))
-                .ok_or_else(|| Error::invalid("Netpbm: dimension overflow"))
-        }
-        _ => Err(Error::invalid(
+    if !matches!(
+        h.magic,
+        Magic::P4BinaryBitmap | Magic::P5BinaryGraymap | Magic::P6BinaryPixmap | Magic::P7Pam
+    ) {
+        return Err(Error::invalid(
             "binary_body_byte_len called with non-binary magic",
-        )),
+        ));
     }
+    // Delegate the closed-form computation to the single public accessor
+    // on `Header`. It returns `None` only for the ASCII magics, which the
+    // guard above already rejected, so the `Some` is infallible here.
+    h.body_byte_len()?.ok_or_else(|| {
+        Error::invalid("binary_body_byte_len called with ASCII magic (no closed form)")
+    })
 }
 
 /// On-disk body byte length for a Portable FloatMap header:
-/// `width * height * channels * 4` IEEE-754 binary32 bytes.
+/// `width * height * channels * 4` IEEE-754 binary32 bytes. Delegates to
+/// [`Header::body_byte_len`], which computes the same product for the
+/// `Pf` / `PF` magics.
 fn pfm_body_byte_len(h: &Header) -> Result<usize> {
-    let w = h.width as usize;
-    let hh = h.height as usize;
-    let ch = h.depth as usize;
-    w.checked_mul(hh)
-        .and_then(|v| v.checked_mul(ch))
-        .and_then(|v| v.checked_mul(4))
-        .ok_or_else(|| Error::invalid("PFM: raster-size overflow"))
+    h.body_byte_len()?
+        .ok_or_else(|| Error::invalid("pfm_body_byte_len called with non-PFM magic"))
 }
 
 /// P4 (binary PBM) → `MonoBlack` row-level memcpy fast path. Validates

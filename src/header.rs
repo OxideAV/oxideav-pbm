@@ -282,6 +282,64 @@ impl Header {
             }
         }
     }
+
+    /// `true` when the body is a whitespace-separated ASCII sample stream
+    /// (`P1` / `P2` / `P3`). For those magics the on-disk body length has
+    /// no closed form (whitespace and `# … LF` comment runs vary), so
+    /// [`Header::body_byte_len`] returns `None`; a stream walker must use
+    /// the tokenizer's reported cursor instead. The binary magics
+    /// (`P4` / `P5` / `P6` / `P7`) and the two Portable FloatMap magics
+    /// (`Pf` / `PF`) have a body length determined entirely by the header.
+    pub fn is_ascii_body(&self) -> bool {
+        self.magic.is_ascii()
+    }
+
+    /// On-disk byte length of the pixel body, when it is a closed-form
+    /// function of the header.
+    ///
+    /// * **Binary PNM/PAM** (`P4` / `P5` / `P6` / `P7`): `Some(len)`.
+    ///   `P4` packs each row to `width.div_ceil(8)` bytes; the other
+    ///   binary magics carry `width * height * depth * bytes_per_sample`
+    ///   bytes (`bytes_per_sample` = 2 when `bits_per_sample() == 16`,
+    ///   else 1).
+    /// * **Portable FloatMap** (`Pf` / `PF`): `Some(len)` =
+    ///   `width * height * channels * 4` raw IEEE-754 binary32 bytes.
+    /// * **ASCII PNM** (`P1` / `P2` / `P3`): `None` — the body length is
+    ///   not a closed form (see [`Header::is_ascii_body`]).
+    ///
+    /// Returns `Err` only on an arithmetic overflow of the dimension
+    /// product (a malformed header claiming a multi-gigapixel image on a
+    /// 32-bit `usize` target); the value is otherwise infallible. This is
+    /// the single public accessor a stream walker can use to advance past
+    /// a binary or float image — it mirrors the per-magic `need`
+    /// computation each decode path performs internally.
+    pub fn body_byte_len(&self) -> Result<Option<usize>> {
+        if self.is_ascii_body() {
+            return Ok(None);
+        }
+        let w = self.width as usize;
+        let hh = self.height as usize;
+        let depth = self.depth as usize;
+        let overflow = || Error::invalid("Netpbm: dimension overflow");
+        let len = match self.magic {
+            Magic::P4BinaryBitmap => w.div_ceil(8).checked_mul(hh).ok_or_else(overflow)?,
+            Magic::P5BinaryGraymap | Magic::P6BinaryPixmap | Magic::P7Pam => {
+                let bytes_per_sample = if self.bits_per_sample() == 16 { 2 } else { 1 };
+                w.checked_mul(hh)
+                    .and_then(|v| v.checked_mul(depth))
+                    .and_then(|v| v.checked_mul(bytes_per_sample))
+                    .ok_or_else(overflow)?
+            }
+            Magic::PfPfmGrayFloat | Magic::PFPfmRgbFloat => w
+                .checked_mul(hh)
+                .and_then(|v| v.checked_mul(depth))
+                .and_then(|v| v.checked_mul(4))
+                .ok_or_else(|| Error::invalid("PFM: raster-size overflow"))?,
+            // The ASCII magics returned early above.
+            Magic::P1AsciiBitmap | Magic::P2AsciiGraymap | Magic::P3AsciiPixmap => unreachable!(),
+        };
+        Ok(Some(len))
+    }
 }
 
 /// Iterator over `# … LF` comment lines found in the **PNM/PAM** portion
@@ -1151,6 +1209,59 @@ mod tests {
         assert!(Magic::PfPfmGrayFloat.is_pfm() && !Magic::PfPfmGrayFloat.is_pnm());
         assert!(Magic::PFPfmRgbFloat.is_pfm() && !Magic::PFPfmRgbFloat.is_pnm());
         assert!(Magic::P7Pam.is_pnm() && !Magic::P7Pam.is_pfm());
+    }
+
+    #[test]
+    fn body_byte_len_is_none_for_ascii_magics() {
+        for buf in [
+            &b"P1\n4 2\n10100110\n"[..],
+            b"P2\n2 2\n255\n0 1 2 3\n",
+            b"P3\n1 1\n255\n0 0 0\n",
+        ] {
+            let h = parse_header(buf).unwrap();
+            assert!(h.is_ascii_body());
+            assert_eq!(h.body_byte_len().unwrap(), None, "{buf:?}");
+        }
+    }
+
+    #[test]
+    fn body_byte_len_p4_packs_rows_to_byte_boundary() {
+        // 11 px wide → 2 bytes/row; 3 rows → 6 bytes.
+        let buf = b"P4\n11 3\n\x00\x00\x00\x00\x00\x00";
+        let h = parse_header(buf).unwrap();
+        assert!(!h.is_ascii_body());
+        assert_eq!(h.body_byte_len().unwrap(), Some(6));
+    }
+
+    #[test]
+    fn body_byte_len_binary_8_and_16_bit() {
+        // P5 8-bit: 4 * 2 * 1 = 8 bytes.
+        let h8 = parse_header(b"P5\n4 2\n255\nABCDEFGH").unwrap();
+        assert_eq!(h8.body_byte_len().unwrap(), Some(8));
+        // P6 16-bit: 2 * 1 * 3 channels * 2 bytes = 12 bytes.
+        let h16 = parse_header(b"P6\n2 1\n65535\n123456789012").unwrap();
+        assert_eq!(h16.body_byte_len().unwrap(), Some(12));
+        // P7 RGBA 16-bit: 1 * 1 * 4 * 2 = 8 bytes.
+        let hpam = parse_header(
+            b"P7\nWIDTH 1\nHEIGHT 1\nDEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\nENDHDR\n01234567",
+        )
+        .unwrap();
+        assert_eq!(hpam.body_byte_len().unwrap(), Some(8));
+    }
+
+    #[test]
+    fn body_byte_len_pfm_counts_float_raster() {
+        // PF RGB 4x3: 4 * 3 * 3 channels * 4 bytes = 144 bytes.
+        let mut buf = b"PF\n4 3\n-1.0\n".to_vec();
+        buf.extend(std::iter::repeat(0u8).take(144));
+        let h = parse_header(&buf).unwrap();
+        assert!(!h.is_ascii_body());
+        assert_eq!(h.body_byte_len().unwrap(), Some(144));
+        // Pf gray 2x2: 2 * 2 * 1 * 4 = 16 bytes.
+        let mut g = b"Pf\n2 2\n1.0\n".to_vec();
+        g.extend(std::iter::repeat(0u8).take(16));
+        let hg = parse_header(&g).unwrap();
+        assert_eq!(hg.body_byte_len().unwrap(), Some(16));
     }
 
     #[test]

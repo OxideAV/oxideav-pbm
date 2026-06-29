@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 380: unified `Header::body_byte_len() -> Result<Option<usize>>`
+  accessor plus the `Header::is_ascii_body()` predicate. The accessor
+  hands back the closed-form on-disk body length for the binary PNM/PAM
+  magics (`P4` row-padded bitmap, `P5`/`P6`/`P7` row-major integer
+  samples) and the two Portable FloatMap magics
+  (`width * height * channels * 4`), and `None` for the ASCII magics
+  (`P1`/`P2`/`P3`) whose body length is not a closed form. The decoder's
+  previously-duplicated private `binary_body_byte_len` /
+  `pfm_body_byte_len` helpers now delegate to this single source of
+  truth, so a stream walker can advance past a binary or float image
+  through one public method.
 - Round 380: `PbmPixelFormat` introspection API — `channels()`,
   `bits_per_channel()`, `bytes_per_pixel()` (returns `None` for the
   sub-byte `MonoBlack` 1-bit format), `is_float()`, `has_alpha()`,
