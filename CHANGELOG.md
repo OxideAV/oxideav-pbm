@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 380: 16-bit ASCII encode support — `encode_pbm_ascii` /
+  `encode_pbm_ascii_plane` (and the explicit `PbmEncodeFormat::Pnm2` /
+  `Pnm3` selectors) now accept `Gray16Le` → P2 ASCII PGM and `Rgb48Le`
+  → P3 ASCII PPM, both with MAXVAL 65535. `pgm(5)` / `ppm(5)` permit a
+  MAXVAL up to 65535 for the plain (ASCII) form just as for the raw
+  form — the body is plain decimal integers either way. Previously the
+  ASCII path rejected both 16-bit formats with `Unsupported`. The new
+  emitters round-trip pixel-exactly back through the decoder.
 - Round 380: standalone, framework-free `peek_magic(input) -> Option<Magic>`
   and `probe_is_netpbm(input) -> bool` front-door accessors. `peek_magic`
   identifies a stream from just the two-byte magic without parsing the

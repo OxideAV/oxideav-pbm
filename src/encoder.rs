@@ -27,7 +27,7 @@
 
 use crate::error::{PbmError as Error, Result};
 
-use crate::ascii::{encode_ascii_body_bits, encode_ascii_body_u8};
+use crate::ascii::{encode_ascii_body, encode_ascii_body_bits, encode_ascii_body_u8};
 use crate::binary::{bgra_to_rgba_row, copy_p4_row_msb, swap_bytes_u16_row};
 use crate::header::Magic;
 use crate::image::{PbmImage, PbmPixelFormat, PbmPlane};
@@ -160,12 +160,14 @@ pub enum PbmEncodeFormat {
     AutoAscii,
     /// Force `P1` plain-ASCII bitmap. Only valid for `MonoBlack`.
     Pnm1,
-    /// Force `P2` plain-ASCII graymap. Valid for `Gray8` (always emits
-    /// MAXVAL 255 — 16-bit grayscale is rejected since ASCII PGM has
-    /// no defined upper-bound representation in our `u16` body
-    /// encoder).
+    /// Force `P2` plain-ASCII graymap. Valid for `Gray8` (MAXVAL 255)
+    /// and `Gray16Le` (MAXVAL 65535) — `pgm(5)` permits a MAXVAL up to
+    /// 65535 for the plain (ASCII) form too, the body is just decimal
+    /// integers.
     Pnm2,
-    /// Force `P3` plain-ASCII pixmap. Valid for `Rgb24` (MAXVAL 255).
+    /// Force `P3` plain-ASCII pixmap. Valid for `Rgb24` (MAXVAL 255) and
+    /// `Rgb48Le` (MAXVAL 65535) — `ppm(5)` permits a MAXVAL up to 65535
+    /// for the plain (ASCII) form too.
     Pnm3,
     /// Force `P4` binary bitmap. Only valid for `MonoBlack`.
     Pnm4,
@@ -214,12 +216,14 @@ pub fn encode_pbm_with_format(image: &PbmImage, format: PbmEncodeFormat) -> Resu
         },
         PbmEncodeFormat::Pnm2 => match image.pixel_format {
             PbmPixelFormat::Gray8 => Ok(emit_ascii_pgm_8(plane, w, h)),
+            PbmPixelFormat::Gray16Le => Ok(emit_ascii_pgm_16(plane, w, h)),
             other => Err(Error::unsupported(format!(
                 "PBM encoder: pixel format {other:?} cannot be emitted as P2"
             ))),
         },
         PbmEncodeFormat::Pnm3 => match image.pixel_format {
             PbmPixelFormat::Rgb24 => Ok(emit_ascii_ppm_8(plane, w, h)),
+            PbmPixelFormat::Rgb48Le => Ok(emit_ascii_ppm_16(plane, w, h)),
             other => Err(Error::unsupported(format!(
                 "PBM encoder: pixel format {other:?} cannot be emitted as P3"
             ))),
@@ -336,7 +340,9 @@ pub fn encode_pbm_ascii_plane(
     match format {
         PbmPixelFormat::MonoBlack => Ok(emit_ascii_pbm_header_and_body(plane, w, h)),
         PbmPixelFormat::Gray8 => Ok(emit_ascii_pgm_8(plane, w, h)),
+        PbmPixelFormat::Gray16Le => Ok(emit_ascii_pgm_16(plane, w, h)),
         PbmPixelFormat::Rgb24 => Ok(emit_ascii_ppm_8(plane, w, h)),
+        PbmPixelFormat::Rgb48Le => Ok(emit_ascii_ppm_16(plane, w, h)),
         other => Err(Error::unsupported(format!(
             "PBM ASCII encoder: pixel format {other:?} not supported"
         ))),
@@ -627,6 +633,40 @@ fn emit_ascii_ppm_8(plane: &PbmPlane, w: usize, h: usize) -> Vec<u8> {
     out
 }
 
+fn emit_ascii_pgm_16(plane: &PbmPlane, w: usize, h: usize) -> Vec<u8> {
+    // P2 / Gray16Le: the plane holds little-endian u16 samples; ASCII
+    // PGM samples are plain decimal integers, so read each LE pair into a
+    // native `u16` and run the generic decimal writer. `pgm(5)` permits
+    // a MAXVAL up to 65535 for the plain (ASCII) form, same as the raw
+    // form — the only difference is the body encoding.
+    let mut samples: Vec<u16> = Vec::with_capacity(w * h);
+    for y in 0..h {
+        let row = &plane.data[y * plane.stride..y * plane.stride + w * 2];
+        for px in row.chunks_exact(2) {
+            samples.push(u16::from_le_bytes([px[0], px[1]]));
+        }
+    }
+    let mut out = header_pnm(Magic::P2AsciiGraymap, w, h, Some(65535));
+    out.extend(encode_ascii_body(&samples, w as u32));
+    out
+}
+
+fn emit_ascii_ppm_16(plane: &PbmPlane, w: usize, h: usize) -> Vec<u8> {
+    // P3 / Rgb48Le: three little-endian u16 channels per pixel. The
+    // column stride for the readability line-break is `w * 3` samples
+    // (three per pixel), matching the 8-bit P3 writer.
+    let mut samples: Vec<u16> = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        let row = &plane.data[y * plane.stride..y * plane.stride + w * 6];
+        for px in row.chunks_exact(2) {
+            samples.push(u16::from_le_bytes([px[0], px[1]]));
+        }
+    }
+    let mut out = header_pnm(Magic::P3AsciiPixmap, w, h, Some(65535));
+    out.extend(encode_ascii_body(&samples, (w * 3) as u32));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -688,6 +728,69 @@ mod tests {
         let s = std::str::from_utf8(&bytes[..bytes.len() - 4]).unwrap();
         assert!(s.contains("TUPLTYPE RGB_ALPHA"));
         assert_eq!(&bytes[bytes.len() - 4..], &[10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn ascii_p2_gray16_emits_maxval_65535_and_round_trips() {
+        // Gray16Le plane → P2 ASCII PGM with MAXVAL 65535.
+        let img = make_image(
+            PbmPixelFormat::Gray16Le,
+            3,
+            1,
+            6,
+            // LE samples: 0x0001, 0xFFFF, 0x1234
+            vec![0x01, 0x00, 0xFF, 0xFF, 0x34, 0x12],
+        );
+        let bytes = encode_pbm_ascii(&img).unwrap();
+        let s = std::str::from_utf8(&bytes).unwrap();
+        assert!(s.starts_with("P2\n3 1\n65535\n"), "header: {s:?}");
+        assert!(s.contains("1 65535 4660"), "body: {s:?}");
+        // Round-trip: decode back and confirm the plane bytes match.
+        let (back, fmt) = crate::decoder::decode_pbm(&bytes).unwrap();
+        assert_eq!(fmt, PbmPixelFormat::Gray16Le);
+        assert_eq!(
+            back.planes[0].data,
+            vec![0x01, 0x00, 0xFF, 0xFF, 0x34, 0x12]
+        );
+    }
+
+    #[test]
+    fn ascii_p3_rgb48_emits_maxval_65535_and_round_trips() {
+        // Rgb48Le plane → P3 ASCII PPM with MAXVAL 65535.
+        let img = make_image(
+            PbmPixelFormat::Rgb48Le,
+            2,
+            1,
+            12,
+            // pixel 0 = (0x0100, 0x0200, 0x0300), pixel 1 = (0xFFFF, 0, 0x8000)
+            vec![
+                0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x80,
+            ],
+        );
+        let bytes = encode_pbm_ascii(&img).unwrap();
+        let s = std::str::from_utf8(&bytes).unwrap();
+        assert!(s.starts_with("P3\n2 1\n65535\n"), "header: {s:?}");
+        // Six samples: 256 512 768 65535 0 32768
+        assert!(s.contains("256 512 768 65535 0 32768"), "body: {s:?}");
+        let (back, fmt) = crate::decoder::decode_pbm(&bytes).unwrap();
+        assert_eq!(fmt, PbmPixelFormat::Rgb48Le);
+        assert_eq!(back.planes[0].data, img.planes[0].data);
+    }
+
+    #[test]
+    fn explicit_pnm2_pnm3_accept_16bit_formats() {
+        let g = make_image(PbmPixelFormat::Gray16Le, 1, 1, 2, vec![0x34, 0x12]);
+        let gb = encode_pbm_with_format(&g, PbmEncodeFormat::Pnm2).unwrap();
+        assert!(gb.starts_with(b"P2\n1 1\n65535\n"));
+        let c = make_image(
+            PbmPixelFormat::Rgb48Le,
+            1,
+            1,
+            6,
+            vec![0x34, 0x12, 0x78, 0x56, 0xBC, 0x9A],
+        );
+        let cb = encode_pbm_with_format(&c, PbmEncodeFormat::Pnm3).unwrap();
+        assert!(cb.starts_with(b"P3\n1 1\n65535\n"));
     }
 
     #[test]

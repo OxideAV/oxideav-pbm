@@ -57,6 +57,10 @@ assert_eq!(comments, vec![&b"created by an editor"[..], &b"tool: v2.10"[..]]);
 
 Plain ASCII output (P1/P2/P3) is available via
 [`encoder::encode_pbm_ascii`]; the binary path is preferred for size.
+The ASCII path covers `MonoBlack` → P1, `Gray8` → P2 (maxval 255),
+`Gray16Le` → P2 (maxval 65535), `Rgb24` → P3 (maxval 255), and
+`Rgb48Le` → P3 (maxval 65535) — `pgm(5)` / `ppm(5)` permit a 16-bit
+maxval for the plain form too.
 [`encoder::encode_pbm_with_format`] takes a [`encoder::PbmEncodeFormat`]
 selector to pin the on-disk magic explicitly (`Pnm1`…`Pnm6` / `Pam7` /
 `Pfm` plus the convenience `AutoBinary` / `AutoAscii` variants).
