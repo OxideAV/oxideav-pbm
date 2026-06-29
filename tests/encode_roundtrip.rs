@@ -258,6 +258,82 @@ fn ascii_p2_round_trip() {
 }
 
 #[test]
+fn ascii_p2_gray16_round_trip() {
+    // 16-bit grayscale ASCII (P2 maxval 65535). Build distinct
+    // high/low bytes per sample so a byte-order bug would surface.
+    let w = 4u32;
+    let h = 3u32;
+    let mut data = Vec::with_capacity((w * h) as usize * 2);
+    for i in 0..(w * h) {
+        let v: u16 = (i.wrapping_mul(4099) & 0xFFFF) as u16;
+        data.extend_from_slice(&v.to_le_bytes());
+    }
+    let src = PbmImage {
+        width: w,
+        height: h,
+        pixel_format: PbmPixelFormat::Gray16Le,
+        planes: vec![PbmPlane {
+            stride: w as usize * 2,
+            data: data.clone(),
+        }],
+        pts: None,
+    };
+    let bytes = encode_pbm_ascii(&src).unwrap();
+    assert!(bytes.starts_with(b"P2\n4 3\n65535\n"));
+    let (back, fmt) = decode_pbm(&bytes).unwrap();
+    assert_eq!(fmt, PbmPixelFormat::Gray16Le);
+    assert_eq!(back.planes[0].data, data);
+}
+
+#[test]
+fn ascii_p3_rgb48_round_trip() {
+    // 16-bit RGB ASCII (P3 maxval 65535), three LE u16 channels/pixel.
+    let w = 3u32;
+    let h = 2u32;
+    let mut data = Vec::with_capacity((w * h) as usize * 6);
+    for i in 0..(w * h * 3) {
+        let v: u16 = (i.wrapping_mul(7919) & 0xFFFF) as u16;
+        data.extend_from_slice(&v.to_le_bytes());
+    }
+    let src = PbmImage {
+        width: w,
+        height: h,
+        pixel_format: PbmPixelFormat::Rgb48Le,
+        planes: vec![PbmPlane {
+            stride: w as usize * 6,
+            data: data.clone(),
+        }],
+        pts: None,
+    };
+    let bytes = encode_pbm_ascii(&src).unwrap();
+    assert!(bytes.starts_with(b"P3\n3 2\n65535\n"));
+    let (back, fmt) = decode_pbm(&bytes).unwrap();
+    assert_eq!(fmt, PbmPixelFormat::Rgb48Le);
+    assert_eq!(back.planes[0].data, data);
+}
+
+#[test]
+fn ascii_auto_picks_16bit_when_format_is_16bit() {
+    // AutoAscii must route a Gray16Le image to P2 maxval 65535 rather
+    // than rejecting it.
+    let src = PbmImage {
+        width: 2,
+        height: 1,
+        pixel_format: PbmPixelFormat::Gray16Le,
+        planes: vec![PbmPlane {
+            stride: 4,
+            data: vec![0x34, 0x12, 0xFF, 0xFF],
+        }],
+        pts: None,
+    };
+    let bytes = encode_pbm_with_format(&src, PbmEncodeFormat::AutoAscii).unwrap();
+    assert!(bytes.starts_with(b"P2\n2 1\n65535\n"));
+    let (back, fmt) = decode_pbm(&bytes).unwrap();
+    assert_eq!(fmt, PbmPixelFormat::Gray16Le);
+    assert_eq!(back.planes[0].data, vec![0x34, 0x12, 0xFF, 0xFF]);
+}
+
+#[test]
 fn header_comments_are_tolerated() {
     let buf = b"P3\n# created by GIMP\n2 1\n# maxval next\n255\n255 0 0 0 255 0\n";
     let (image, fmt) = decode_pbm(buf).unwrap();
