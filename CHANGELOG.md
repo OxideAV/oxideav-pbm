@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round 380: `PbmPixelFormat` introspection API — `channels()`,
+  `bits_per_channel()`, `bytes_per_pixel()` (returns `None` for the
+  sub-byte `MonoBlack` 1-bit format), `is_float()`, `has_alpha()`,
+  `is_color()`, and `is_bilevel()`. These let a caller reason about a
+  decoded image's layout without enumerating the twelve format variants
+  by hand. Companion `PbmImage` helpers `min_row_bytes()` (handles the
+  `MonoBlack` `width.div_ceil(8)` packed-row case), `min_plane_len()`,
+  and `validate()` (a crate-local consistency check that a
+  programmatically-built image's single plane carries enough bytes for
+  its declared dimensions before it reaches the encoder).
+
 ### Fixed
 
 - Round 336: the framework `Decoder` trait impl (`PbmDecoder`, reachable
