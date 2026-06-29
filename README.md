@@ -195,6 +195,25 @@ byte-swap helpers that LLVM lowers to vector lane shuffles, and the
 bit-packed P4 path is a per-row `copy_from_slice` since the `MonoBlack`
 plane layout is byte-identical to the P4 wire format.
 
+## Typed introspection & stream-dispatch helpers
+
+`PbmPixelFormat` carries derived accessors so a caller can reason about a
+decoded image's layout without enumerating the twelve variants by hand:
+`channels()`, `bits_per_channel()`, `bytes_per_pixel()` (returns `None`
+for the sub-byte 1-bit `MonoBlack`), `is_float()`, `has_alpha()`,
+`is_color()`, and `is_bilevel()`. The companion `PbmImage::min_row_bytes()`
+/ `min_plane_len()` / `validate()` let a caller size or sanity-check a
+programmatically-built image before encoding it.
+
+For stream dispatch the always-compiled (framework-free) front door is
+`peek_magic(input) -> Option<Magic>` (identify a stream from the two-byte
+magic alone) and `probe_is_netpbm(input) -> bool` (the cheap
+`magic + whitespace` structural sniff the framework container probe also
+uses). `Header::body_byte_len() -> Result<Option<usize>>` returns the
+closed-form on-disk body length for the binary and Portable FloatMap
+magics — and `None` for the ASCII magics whose body length is not a
+closed form (`Header::is_ascii_body()` distinguishes the two).
+
 ## Registration
 
 ```rust
