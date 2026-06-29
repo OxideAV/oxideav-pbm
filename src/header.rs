@@ -449,6 +449,45 @@ pub fn iter_pnm_header_comments(input: &[u8]) -> PnmHeaderComments<'_> {
     }
 }
 
+/// Peek at the first two bytes of `input` and return the [`Magic`] they
+/// encode, without parsing the rest of the header.
+///
+/// This is the cheap front-door for stream dispatch and format probing:
+/// it does no allocation and reads at most two bytes. A `None` result
+/// means the input does not begin with a recognised Netpbm / Portable
+/// FloatMap magic (`P1`…`P7`, `Pf`, `PF`). Note this only inspects the
+/// magic — a `Some` result does **not** guarantee the rest of the header
+/// is well-formed; use [`parse_header`] for that.
+pub fn peek_magic(input: &[u8]) -> Option<Magic> {
+    Magic::from_bytes(input)
+}
+
+/// Cheap structural probe: `true` when `input` plausibly begins a Netpbm
+/// or Portable FloatMap file.
+///
+/// The check is the same one the framework container probe uses: byte 0
+/// is `P`, byte 1 is one of the recognised magic characters
+/// (`1`…`7` / `f` / `F`), and — when present — byte 2 is ASCII
+/// whitespace (the format grammars mandate a whitespace / LF separator
+/// immediately after the two-byte magic). That `magic + whitespace` pair
+/// is rare enough in arbitrary binary data to be a reliable signal. A
+/// buffer shorter than three bytes passes on the magic alone (the
+/// separator simply hasn't been read yet).
+///
+/// This lives in the always-compiled header module (not the
+/// `registry`-gated container) so a standalone, `oxideav-core`-free
+/// consumer can sniff a buffer without pulling in the framework; the
+/// container's probe delegates here so the detection rule has a single
+/// home.
+pub fn probe_is_netpbm(input: &[u8]) -> bool {
+    if input.len() < 2 || input[0] != b'P' {
+        return false;
+    }
+    let magic_ok = matches!(input[1], b'1'..=b'7' | b'f' | b'F');
+    let ws_ok = input.len() < 3 || matches!(input[2], b'\n' | b' ' | b'\t' | b'\r');
+    magic_ok && ws_ok
+}
+
 /// Parse a Netpbm header from the beginning of `input`. Returns the
 /// fully-populated [`Header`] including `data_offset`, the byte index of
 /// the first sample byte.
@@ -1209,6 +1248,64 @@ mod tests {
         assert!(Magic::PfPfmGrayFloat.is_pfm() && !Magic::PfPfmGrayFloat.is_pnm());
         assert!(Magic::PFPfmRgbFloat.is_pfm() && !Magic::PFPfmRgbFloat.is_pnm());
         assert!(Magic::P7Pam.is_pnm() && !Magic::P7Pam.is_pfm());
+    }
+
+    #[test]
+    fn peek_magic_reads_only_the_two_byte_magic() {
+        // Recognises every magic from just the first two bytes — no need
+        // for a well-formed remainder.
+        assert_eq!(peek_magic(b"P1 anything"), Some(Magic::P1AsciiBitmap));
+        assert_eq!(peek_magic(b"P7\n"), Some(Magic::P7Pam));
+        assert_eq!(peek_magic(b"PF\n"), Some(Magic::PFPfmRgbFloat));
+        assert_eq!(peek_magic(b"Pf\n"), Some(Magic::PfPfmGrayFloat));
+        // Garbage / too-short / wrong-case → None.
+        assert_eq!(peek_magic(b"P9\n"), None);
+        assert_eq!(peek_magic(b"X1"), None);
+        assert_eq!(peek_magic(b"P"), None);
+        assert_eq!(peek_magic(b""), None);
+    }
+
+    #[test]
+    fn probe_accepts_well_formed_magic_and_rejects_noise() {
+        // Magic followed by whitespace → accepted for every variant.
+        for buf in [
+            &b"P1\n"[..],
+            b"P2 ",
+            b"P3\t",
+            b"P4\r",
+            b"P5\n",
+            b"P6 ",
+            b"P7\n",
+            b"Pf\n",
+            b"PF\n",
+        ] {
+            assert!(probe_is_netpbm(buf), "should accept {buf:?}");
+        }
+        // A two-byte buffer passes on the magic alone (separator unread).
+        assert!(probe_is_netpbm(b"P6"));
+        // Magic followed by a non-whitespace byte → rejected (e.g. a
+        // random `P5` inside binary noise where byte 2 is a data byte).
+        assert!(!probe_is_netpbm(b"P5X"));
+        assert!(!probe_is_netpbm(b"P1a"));
+        // Wrong magic char / wrong lead byte / too short.
+        assert!(!probe_is_netpbm(b"P9\n"));
+        assert!(!probe_is_netpbm(b"XY\n"));
+        assert!(!probe_is_netpbm(b"P"));
+        assert!(!probe_is_netpbm(b""));
+    }
+
+    #[test]
+    fn probe_agrees_with_peek_magic_on_the_magic_set() {
+        // Whenever the probe accepts a buffer whose third byte is
+        // whitespace, peek_magic must also recognise the magic (the two
+        // share the same magic-character set).
+        for buf in [&b"P1 "[..], b"P7\n", b"Pf\n", b"PF\n"] {
+            assert!(probe_is_netpbm(buf));
+            assert!(peek_magic(buf).is_some());
+        }
+        // And a magic peek_magic rejects, the probe rejects too.
+        assert!(peek_magic(b"P8\n").is_none());
+        assert!(!probe_is_netpbm(b"P8\n"));
     }
 
     #[test]

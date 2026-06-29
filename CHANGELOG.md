@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 380: standalone, framework-free `peek_magic(input) -> Option<Magic>`
+  and `probe_is_netpbm(input) -> bool` front-door accessors. `peek_magic`
+  identifies a stream from just the two-byte magic without parsing the
+  rest of the header; `probe_is_netpbm` is the cheap `magic + whitespace`
+  structural sniff used for format detection. Both live in the
+  always-compiled header module so an `oxideav-core`-free consumer can
+  sniff a buffer; the `registry`-gated container probe now delegates to
+  `probe_is_netpbm` so the detection rule has a single home.
 - Round 380: unified `Header::body_byte_len() -> Result<Option<usize>>`
   accessor plus the `Header::is_ascii_body()` predicate. The accessor
   hands back the closed-form on-disk body length for the binary PNM/PAM

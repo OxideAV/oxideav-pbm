@@ -71,7 +71,8 @@ pub use encoder::{
 };
 pub use error::{PbmError, Result};
 pub use header::{
-    iter_pnm_header_comments, parse_header, Header, Magic, PfmInfo, PnmHeaderComments, Tupltype,
+    iter_pnm_header_comments, parse_header, peek_magic, probe_is_netpbm, Header, Magic, PfmInfo,
+    PnmHeaderComments, Tupltype,
 };
 pub use image::{PbmImage, PbmPixelFormat, PbmPlane};
 pub use pfm::{

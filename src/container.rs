@@ -17,7 +17,7 @@ use oxideav_core::{
     ContainerRegistry, Demuxer, Muxer, ProbeData, ProbeScore, ReadSeek, WriteSeek, MAX_PROBE_SCORE,
 };
 
-use crate::header::{parse_header, Magic, Tupltype};
+use crate::header::{parse_header, probe_is_netpbm, Magic, Tupltype};
 
 pub fn register(reg: &mut ContainerRegistry) {
     reg.register_demuxer("pbm", open_demuxer);
@@ -36,16 +36,13 @@ pub fn register(reg: &mut ContainerRegistry) {
 }
 
 fn probe(data: &ProbeData) -> ProbeScore {
-    if data.buf.len() >= 2 && data.buf[0] == b'P' {
-        // Magic byte 1 must be one of '1'..'7' (PNM/PAM) or 'f'/'F'
-        // (Portable FloatMap) AND byte 2 must be ASCII whitespace — that
-        // pair is rare enough in random data to claim a max-score probe
-        // (the format specs mandate the whitespace / LF separator).
-        let m = data.buf[1];
-        let ws_ok = data.buf.len() < 3 || matches!(data.buf[2], b'\n' | b' ' | b'\t' | b'\r');
-        if matches!(m, b'1'..=b'7' | b'f' | b'F') && ws_ok {
-            return MAX_PROBE_SCORE;
-        }
+    // The `magic + whitespace` structural check lives in the always-compiled
+    // header module so a standalone consumer can reuse it; delegate here
+    // rather than re-implementing the byte rule. That pair is rare enough
+    // in random data to claim a max-score probe (the format specs mandate
+    // the whitespace / LF separator immediately after the two-byte magic).
+    if probe_is_netpbm(data.buf) {
+        return MAX_PROBE_SCORE;
     }
     if matches!(
         data.ext,
