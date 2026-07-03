@@ -1,5 +1,7 @@
 # oxideav-pbm
 
+[![CI](https://github.com/OxideAV/oxideav-pbm/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-pbm/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-pbm.svg)](https://crates.io/crates/oxideav-pbm) [![docs.rs](https://docs.rs/oxideav-pbm/badge.svg)](https://docs.rs/oxideav-pbm) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pure-Rust Netpbm (PBM/PGM/PPM/PNM/PAM/PFM) image codec and container for
 the [`oxideav`](https://github.com/OxideAV/oxideav) framework. Covers
 all nine Netpbm magic numbers in one self-contained crate. Implemented
