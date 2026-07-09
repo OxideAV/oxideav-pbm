@@ -392,7 +392,7 @@ fn p4_blank_padding_after_header_does_not_eat_pixel_byte() {
     // the header from the binary raster. The encoder always emits LF;
     // a CR or space is also legal per the spec. Verify we read the
     // first raster byte correctly regardless of separator.
-    for sep in [b'\n', b'\r', b' ', b'\t'] {
+    for sep in *b"\n\r \t" {
         let buf: &[u8] = &[
             b'P', b'4', b'\n', b'8', b' ', b'1', sep, // separator
             0xAB,
