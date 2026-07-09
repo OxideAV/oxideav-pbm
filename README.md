@@ -168,11 +168,20 @@ natively as the crate-local `Ya16Le`; like the PFM formats it has no
 
 ## Fuzzing
 
-A `fuzz/` cargo-fuzz workspace exercises five independent entry points:
+A `fuzz/` cargo-fuzz workspace exercises six independent entry points:
 `decode` (full pipeline), `header` (header parser in isolation),
 `encode_roundtrip` (every `PbmEncodeFormat` × `PbmPixelFormat` pair
-including rejection paths), `pfm` (Portable FloatMap decoder), and
-`multi` (multi-image stream walker). Both ASCII and binary decoders
+including rejection paths), `pfm` (Portable FloatMap decoder), `multi`
+(multi-image stream walker), and `recode` (decode → encode → decode
+fixed-point). The first five enforce panic-freedom on random bytes; the
+`recode` target adds a *semantic* contract — any image the decoder
+produces must re-encode + re-decode unchanged (identical dimensions,
+pixel format, plane stride and plane bytes) with an idempotent encoder —
+catching encoder/decoder asymmetries (a channel swap, wrong maxval,
+byte-order flip, stride bug or dropped channel) that a one-directional
+never-panic harness cannot see. The same fixed point is pinned as a
+CI-visible integration test (`tests/recode_identity.rs`) across the
+whole decode-producible format matrix. Both ASCII and binary decoders
 validate dimensions against the available body length before allocating,
 guarding against pre-allocation OOM. A daily CI run
 (`.github/workflows/fuzz.yml`) keeps the contract enforced.

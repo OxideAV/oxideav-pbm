@@ -110,3 +110,17 @@ name = "multi"
 path = "fuzz_targets/multi.rs"
 test = false
 doc = false
+
+# Recode fixed-point — `decode_pbm` → `encode_pbm` → `decode_pbm`.
+# Where `decode` and `encode_roundtrip` each fuzz one direction for
+# panic-freedom, this target closes the loop and asserts a *semantic*
+# invariant: any image the decoder produces must re-encode + re-decode
+# unchanged (same dims, format, stride, plane bytes) and the encoder
+# output must be idempotent. Catches encoder/decoder asymmetries — a
+# channel swap, wrong maxval, byte-order flip, stride bug or dropped
+# channel — that a one-directional never-panic harness cannot see.
+[[bin]]
+name = "recode"
+path = "fuzz_targets/recode.rs"
+test = false
+doc = false

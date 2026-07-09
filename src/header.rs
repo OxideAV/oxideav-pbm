@@ -510,6 +510,17 @@ fn parse_pnm_header(input: &[u8], magic: Magic) -> Result<Header> {
     let mut cursor = 2usize;
     let width = next_uint(input, &mut cursor)?;
     let height = next_uint(input, &mut cursor)?;
+    // A zero width or height describes an image with no pixels. The
+    // binary body decoder and the PFM header parser already reject that,
+    // but the ASCII (P1/P2/P3) path used to let it through — so a
+    // zero-dimension `P1` decoded to an empty image that then failed to
+    // re-encode round-trip (the encoder emits binary `P4`, which the
+    // decoder rejects). Reject it here so the invariant "a parsed
+    // `Header` always has width >= 1 and height >= 1" holds for every
+    // magic, closing that decode/encode asymmetry.
+    if width == 0 || height == 0 {
+        return Err(Error::invalid("Netpbm: zero dimension"));
+    }
     let maxval = match magic {
         Magic::P1AsciiBitmap | Magic::P4BinaryBitmap => 1,
         _ => {
@@ -606,6 +617,11 @@ fn parse_pam_header(input: &[u8]) -> Result<Header> {
     let height = height.ok_or_else(|| Error::invalid("PAM: missing HEIGHT"))?;
     let depth = depth.ok_or_else(|| Error::invalid("PAM: missing DEPTH"))?;
     let maxval = maxval.ok_or_else(|| Error::invalid("PAM: missing MAXVAL"))?;
+    // Same zero-dimension guard the PNM path enforces: a `WIDTH 0` /
+    // `HEIGHT 0` PAM has no pixels and would not survive a re-encode.
+    if width == 0 || height == 0 {
+        return Err(Error::invalid("Netpbm: zero dimension"));
+    }
     if depth == 0 || depth > 4 {
         return Err(Error::unsupported(format!(
             "PAM: DEPTH {depth} out of round-1 range 1..=4"
