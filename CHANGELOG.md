@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-pbm/compare/v0.0.4...v0.0.5) - 2026-07-09
+
+### Other
+
+- satisfy clippy::byte_char_slices (stable 1.97)
+- hostile-header regression suite
+- reject zero-dimension images; add recode fixed-point fuzz target
+- decode→encode→decode fixed-point identity test
+- add CI / crates.io / docs.rs / MIT-license badges
+- document r380 typed introspection + stream-dispatch helpers
+- end-to-end 16-bit ASCII encode round-trip integration tests
+- 16-bit ASCII encode for P2 (Gray16Le) and P3 (Rgb48Le)
+- add framework-free peek_magic + probe_is_netpbm front door
+- unify on-disk body length behind Header::body_byte_len
+- add PbmPixelFormat introspection + PbmImage layout helpers
+- framework Decoder path decodes every image in a multi-image packet
+- round 331 — PFM-only multi-image stream walker decode_pfm_multi
+- encode-side scale-factor folding (apply_inverse_pfm_scale + encode_pfm_scaled)
+- round 319 — header-carrying stream-walk entries
+- round 313 — length-aware PFM entry decode_pfm_consumed
+- refresh to current status, drop per-round changelog cruft
+- round 305 — opt-in PFM scale-factor application (apply_pfm_scale + decode_pfm_scaled)
+- add `multi` target for the multi-image stream walker (round 299)
+- decode multi-image (concatenated) Netpbm/PAM/PFM streams
+- native 16-bit GRAYSCALE_ALPHA via new Ya16Le pixel format
+- PFM decode: reject degenerate scale line (±0.0, ±inf), not just NaN
+- typed Magic::wire_bytes + is_binary/is_pnm predicates
+- per-row vector-lane channel shuffle (~22x faster vs r250)
+- per-row memcpy / row-swap bytewise fast path
+- drop release-plz.toml — use release-plz defaults across the workspace
+- per-row memcpy MonoBlack fast path (~520x faster vs r247)
+- typed comment-iteration accessor iter_pnm_header_comments
+- per-row memcpy bit packer (~590× faster vs r228)
+- P7 GRAYSCALE 16-bit row-level LE→BE byte-swap
+- 16-bit encode LE→BE swap: row-level autovectorizable helper (~18× faster)
+- binary 16-bit byte-swap: row-level autovectorizable helpers
+- PFM big-endian byte-swap: row-level autovectorizable helper (~15× faster)
+- PFM (Pf/PF) coverage: dedicated fuzz target + 12 criterion benches
+
 ### Added
 
 - Round 380: 16-bit ASCII encode support — `encode_pbm_ascii` /
