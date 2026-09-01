@@ -791,6 +791,7 @@ fn parse_scale(line: &[u8]) -> Result<f32> {
 /// Leaves `cursor` pointing one byte past the last digit (which is the
 /// terminating whitespace for binary formats and the start of the next
 /// token / pixel for ASCII formats).
+#[doc(hidden)]
 pub fn next_uint(input: &[u8], cursor: &mut usize) -> Result<u32> {
     skip_ws_and_comments(input, cursor);
     let start = *cursor;
@@ -824,6 +825,7 @@ pub fn next_uint(input: &[u8], cursor: &mut usize) -> Result<u32> {
 
 /// Like [`next_uint`] but returns `None` instead of an error when the
 /// stream is exhausted (whitespace-only tail after the last token).
+#[doc(hidden)]
 pub fn try_next_uint(input: &[u8], cursor: &mut usize) -> Result<Option<u32>> {
     skip_ws_and_comments(input, cursor);
     if *cursor >= input.len() {

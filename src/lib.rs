@@ -44,7 +44,11 @@
 //! still exposes the standalone [`decode_pbm`] / [`encode_pbm`] /
 //! [`encode_pbm_ascii`] API.
 
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod ascii;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub mod binary;
 #[cfg(feature = "registry")]
 pub mod container;
@@ -82,9 +86,12 @@ pub use pfm::{
 
 #[cfg(feature = "registry")]
 pub use registry::{
-    __oxideav_entry, pbm_to_pixel_format, pixel_format_to_pbm, register, register_codecs,
-    register_containers,
+    pbm_to_pixel_format, pixel_format_to_pbm, register, register_codecs, register_containers,
 };
+
+#[cfg(feature = "registry")]
+#[doc(hidden)]
+pub use registry::__oxideav_entry;
 
 #[cfg(test)]
 mod tests {
