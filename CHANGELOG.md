@@ -9,6 +9,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 467: the `IMAGE_CRATE_API` contract surface at the crate root —
+  `probe`, `info -> ImageInfo`, `decode` / `decode_with(&DecodeOptions)`
+  / `decode_rgb8 -> RgbImage` / `decode_rgba8 -> RgbaImage` /
+  `decode_all` / `decode_all_with -> Vec<Frame>` / `decode_from<R: Read>`,
+  `encode(&PbmImage, &EncodeOptions)` / `encode_rgb8` / `encode_rgba8` /
+  `encode_to<W: Write>`; types `Plane`, `ColorInfo` + `ColorRange`,
+  `Metadata`, `RgbImage`, `RgbaImage`, `ImageInfo` (with the parsed
+  `header` as the format extra), `Frame { image, delay, header }`,
+  `DecodeOptions` (`max_width` / `max_height` / `max_pixels` /
+  `max_bytes` default 1 GiB / `strict`), `EncodeOptions` (`ascii`, `pam`,
+  `maxval`, `tupltype`, `pfm_little_endian`, `pfm_scale`), the
+  `PixelFormat` and `Error` aliases. `PbmImage` gained `new` / `packed` /
+  `from_rgb8` / `from_rgba8` (fallible, geometry validated), `width()` /
+  `height()` / `format()` / `stride()`, `as_bytes()` / `into_raw()`,
+  `to_rgb8()` / `to_rgba8()` (exact kernels for every layout; 16-bit by
+  round-half-up, float clamped then ×255). `PbmPixelFormat::MonoWhite`
+  (encode-side input, inverted to the P4 sense), `row_bytes()`, `ALL`.
+  `PbmError::LimitExceeded` and `PbmError::Io(std::io::Error)` (+
+  `From<std::io::Error>`).
+- Round 467: `EncodeOptions::maxval` writes any `MAXVAL` in 1..=65535
+  (samples rescaled by round-half-up, one or two big-endian bytes on
+  disk), `EncodeOptions::tupltype` writes a custom PAM token, and
+  `EncodeOptions::pam` forces the P7 container for every integer layout
+  (bilevel as `BLACKANDWHITE`, `MAXVAL 1`).
+- Round 467: `DecodeOptions::strict` rejects a sample above `MAXVAL`
+  (plain-text P2 / P3 and binary bodies at a non-natural `MAXVAL`)
+  instead of clamping it; lenient decoding is unchanged byte-for-byte.
+- Round 467 (`registry`): `make_decoder` / `make_encoder` re-exported at
+  the root; `From<PbmImage> for VideoFrame`, `PbmImage::from_video_frame`
+  and `TryFrom<(&VideoFrame, &CodecParameters)>` (crate `Error`);
+  `to_core_pixel_format` / `from_core_pixel_format` plus `From` /
+  `TryFrom` between `PbmPixelFormat` and `oxideav_core::PixelFormat`
+  (now 1:1 for every layout: `Ya16Le`, `GrayF32Le`, `RgbF32Le`,
+  `MonoWhite`, `Bgra` included and advertised by the container);
+  `CodecOptionsStruct` schema for `EncodeOptions` so the framework
+  encoder accepts `ascii` / `pam` / `maxval` / `tupltype` /
+  `pfm_little_endian` / `pfm_scale`; `LimitExceeded` maps to
+  `oxideav_core::Error::ResourceExhausted`.
+- Round 467: `tests/image_crate_api.rs` pins the contract (shape,
+  fallible constructors, `encode_rgb8` → P6 / `encode_rgba8` → P7
+  `RGB_ALPHA`, lossless round trip per layout and flavour, limits,
+  strictness, colour defaults, deprecated wrappers, registry adapters);
+  fuzz targets `decode` / `multi` / `recode` / `encode_roundtrip` drive
+  the contract surface; `ci-standalone` now also runs clippy.
+
+### Changed
+
+- Round 467: `PbmImage` is the contract shape — `pixel_format` is now
+  `format`, `pts` is gone (the registry adapter carries the packet
+  timestamp), `color: ColorInfo` and `metadata: Metadata` were added, and
+  the struct is `#[non_exhaustive]` (construct through `PbmImage::packed`
+  / `new`). `PbmImage::validate` returns the crate `Result`.
+- Round 467: `PbmPixelFormat::GrayF32` / `RgbF32` are renamed
+  `GrayF32Le` / `RgbF32Le` to mirror `oxideav_core::PixelFormat`; the old
+  names remain as deprecated associated constants. The enum is
+  `#[non_exhaustive]`.
+- Round 467: `PbmError` no longer derives `Clone` / `PartialEq` / `Eq`
+  (it carries `std::io::Error`); match on the variant or on `Display`.
+  The enum is `#[non_exhaustive]`.
+- Round 467: the framework `Decoder` / `Encoder` are thin adapters over
+  the standalone `decode_all` / `encode` (one implementation); the
+  encoder rebuilds the image through `PbmImage::from_video_frame`.
+- Round 467: `PbmImage::color` is filled with the family's documented
+  convention — `ColorInfo::netpbm_default()` (full range, BT.709
+  primaries and transfer, identity matrix) for P1–P7 and
+  `ColorInfo::pfm_default()` (full range, linear transfer, primaries
+  unspecified) for `Pf` / `PF`.
+- Round 467: a header whose decoded plane would exceed
+  `DecodeOptions::max_bytes` (default 1 GiB) now fails with
+  `LimitExceeded` from the header alone; previously the body-length
+  check reported `InvalidData`.
+
+### Deprecated
+
+- Round 467 (one release, thin wrappers over the contract functions):
+  `decode_pbm` → `decode` (the format is `PbmImage::format`),
+  `decode_pbm_multi` / `decode_pbm_multi_with_headers` → `decode_all`
+  (`Frame::header`), `decode_pbm_consumed` / `decode_pbm_header_consumed`
+  → `decode` / `decode_all` / `info`, `encode_pbm` → `encode`,
+  `encode_pbm_ascii` / `encode_pbm_ascii_plane` → `encode` with
+  `EncodeOptions::with_ascii(true)`, `encode_pbm_plane` → `encode`,
+  `encode_pbm_with_format` + `PbmEncodeFormat` → `encode` with
+  `EncodeOptions` fields, `probe_is_netpbm` → `probe`, `PbmPlane` →
+  `Plane`, `PbmPixelFormat::GrayF32` / `RgbF32` → `GrayF32Le` / `RgbF32Le`,
+  and under `registry` `pixel_format_to_pbm` / `pbm_to_pixel_format` →
+  `from_core_pixel_format` / `to_core_pixel_format`.
+
 - Round 380: 16-bit ASCII encode support — `encode_pbm_ascii` /
   `encode_pbm_ascii_plane` (and the explicit `PbmEncodeFormat::Pnm2` /
   `Pnm3` selectors) now accept `Gray16Le` → P2 ASCII PGM and `Rgb48Le`
