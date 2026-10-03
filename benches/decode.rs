@@ -51,11 +51,12 @@
 //! Run with:
 //!     cargo bench -p oxideav-pbm --bench decode
 
+#![allow(deprecated)]
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use oxideav_pbm::{
     decode_pbm, encode_pbm, encode_pbm_ascii, encode_pbm_with_format, encode_pfm, PbmEncodeFormat,
-    PbmImage, PbmPixelFormat, PbmPlane,
+    PbmImage, PbmPixelFormat,
 };
 
 /// xorshift32 — keeps the bench input from being trivially compressible
@@ -77,16 +78,7 @@ fn build_mono(width: u32, height: u32) -> PbmImage {
     for byte in data.iter_mut() {
         *byte = xorshift_byte(&mut state);
     }
-    PbmImage {
-        width,
-        height,
-        pixel_format: PbmPixelFormat::MonoBlack,
-        planes: vec![PbmPlane {
-            stride: row_bytes,
-            data,
-        }],
-        pts: None,
-    }
+    PbmImage::packed(width, height, PbmPixelFormat::MonoBlack, row_bytes, data).unwrap()
 }
 
 fn build_gray8(width: u32, height: u32) -> PbmImage {
@@ -97,13 +89,7 @@ fn build_gray8(width: u32, height: u32) -> PbmImage {
     for byte in data.iter_mut() {
         *byte = xorshift_byte(&mut state);
     }
-    PbmImage {
-        width,
-        height,
-        pixel_format: PbmPixelFormat::Gray8,
-        planes: vec![PbmPlane { stride: w, data }],
-        pts: None,
-    }
+    PbmImage::packed(width, height, PbmPixelFormat::Gray8, w, data).unwrap()
 }
 
 fn build_gray16(width: u32, height: u32) -> PbmImage {
@@ -114,16 +100,7 @@ fn build_gray16(width: u32, height: u32) -> PbmImage {
     for byte in data.iter_mut() {
         *byte = xorshift_byte(&mut state);
     }
-    PbmImage {
-        width,
-        height,
-        pixel_format: PbmPixelFormat::Gray16Le,
-        planes: vec![PbmPlane {
-            stride: w * 2,
-            data,
-        }],
-        pts: None,
-    }
+    PbmImage::packed(width, height, PbmPixelFormat::Gray16Le, w * 2, data).unwrap()
 }
 
 fn build_rgb24(width: u32, height: u32) -> PbmImage {
@@ -134,16 +111,7 @@ fn build_rgb24(width: u32, height: u32) -> PbmImage {
     for byte in data.iter_mut() {
         *byte = xorshift_byte(&mut state);
     }
-    PbmImage {
-        width,
-        height,
-        pixel_format: PbmPixelFormat::Rgb24,
-        planes: vec![PbmPlane {
-            stride: w * 3,
-            data,
-        }],
-        pts: None,
-    }
+    PbmImage::packed(width, height, PbmPixelFormat::Rgb24, w * 3, data).unwrap()
 }
 
 fn build_rgb48(width: u32, height: u32) -> PbmImage {
@@ -154,16 +122,7 @@ fn build_rgb48(width: u32, height: u32) -> PbmImage {
     for byte in data.iter_mut() {
         *byte = xorshift_byte(&mut state);
     }
-    PbmImage {
-        width,
-        height,
-        pixel_format: PbmPixelFormat::Rgb48Le,
-        planes: vec![PbmPlane {
-            stride: w * 6,
-            data,
-        }],
-        pts: None,
-    }
+    PbmImage::packed(width, height, PbmPixelFormat::Rgb48Le, w * 6, data).unwrap()
 }
 
 fn build_rgba(width: u32, height: u32) -> PbmImage {
@@ -174,16 +133,7 @@ fn build_rgba(width: u32, height: u32) -> PbmImage {
     for byte in data.iter_mut() {
         *byte = xorshift_byte(&mut state);
     }
-    PbmImage {
-        width,
-        height,
-        pixel_format: PbmPixelFormat::Rgba,
-        planes: vec![PbmPlane {
-            stride: w * 4,
-            data,
-        }],
-        pts: None,
-    }
+    PbmImage::packed(width, height, PbmPixelFormat::Rgba, w * 4, data).unwrap()
 }
 
 fn build_rgba64(width: u32, height: u32) -> PbmImage {
@@ -194,16 +144,7 @@ fn build_rgba64(width: u32, height: u32) -> PbmImage {
     for byte in data.iter_mut() {
         *byte = xorshift_byte(&mut state);
     }
-    PbmImage {
-        width,
-        height,
-        pixel_format: PbmPixelFormat::Rgba64Le,
-        planes: vec![PbmPlane {
-            stride: w * 8,
-            data,
-        }],
-        pts: None,
-    }
+    PbmImage::packed(width, height, PbmPixelFormat::Rgba64Le, w * 8, data).unwrap()
 }
 
 /// Build a finite-valued float image (`Pf` 1-channel or `PF` 3-channel)
@@ -230,17 +171,11 @@ fn build_float_image(width: u32, height: u32, channels: usize, seed: u32) -> Pbm
         }
     }
     let format = if channels == 3 {
-        PbmPixelFormat::RgbF32
+        PbmPixelFormat::RgbF32Le
     } else {
-        PbmPixelFormat::GrayF32
+        PbmPixelFormat::GrayF32Le
     };
-    PbmImage {
-        width,
-        height,
-        pixel_format: format,
-        planes: vec![PbmPlane { stride, data }],
-        pts: None,
-    }
+    PbmImage::packed(width, height, format, stride, data).unwrap()
 }
 
 fn bench_decode_p4_mono_640x480(c: &mut Criterion) {

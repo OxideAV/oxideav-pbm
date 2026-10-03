@@ -1,9 +1,10 @@
 //! End-to-end encode → decode roundtrip across every supported
 //! Netpbm output format.
 
+#![allow(deprecated)]
 use oxideav_pbm::{
     decode_pbm, encode_pbm, encode_pbm_ascii, encode_pbm_with_format, PbmEncodeFormat, PbmImage,
-    PbmPixelFormat, PbmPlane,
+    PbmPixelFormat,
 };
 
 /// Build a deterministic test pattern with `bytes_per_pixel` samples
@@ -17,16 +18,7 @@ fn pattern(w: u32, h: u32, bpp: usize, format: PbmPixelFormat) -> PbmImage {
             }
         }
     }
-    PbmImage {
-        width: w,
-        height: h,
-        pixel_format: format,
-        planes: vec![PbmPlane {
-            stride: w as usize * bpp,
-            data,
-        }],
-        pts: None,
-    }
+    PbmImage::packed(w, h, format, w as usize * bpp, data).unwrap()
 }
 
 #[test]
@@ -43,16 +35,7 @@ fn roundtrip_p4_monoblack() {
             }
         }
     }
-    let src = PbmImage {
-        width: w,
-        height: h,
-        pixel_format: PbmPixelFormat::MonoBlack,
-        planes: vec![PbmPlane {
-            stride: row_bytes,
-            data: data.clone(),
-        }],
-        pts: None,
-    };
+    let src = PbmImage::packed(w, h, PbmPixelFormat::MonoBlack, row_bytes, data.clone()).unwrap();
     let bytes = encode_pbm(&src).unwrap();
     assert!(bytes.starts_with(b"P4\n"));
     let (back, fmt) = decode_pbm(&bytes).unwrap();
@@ -91,16 +74,7 @@ fn roundtrip_p5_gray16() {
             data.extend_from_slice(&v.to_le_bytes());
         }
     }
-    let src = PbmImage {
-        width: w,
-        height: h,
-        pixel_format: PbmPixelFormat::Gray16Le,
-        planes: vec![PbmPlane {
-            stride: w as usize * 2,
-            data,
-        }],
-        pts: None,
-    };
+    let src = PbmImage::packed(w, h, PbmPixelFormat::Gray16Le, w as usize * 2, data).unwrap();
     let bytes = encode_pbm(&src).unwrap();
     assert!(bytes.starts_with(b"P5\n"));
     assert!(bytes.windows(5).any(|w| w == b"65535"));
@@ -132,16 +106,7 @@ fn roundtrip_p6_rgb16() {
             }
         }
     }
-    let src = PbmImage {
-        width: w,
-        height: h,
-        pixel_format: PbmPixelFormat::Rgb48Le,
-        planes: vec![PbmPlane {
-            stride: w as usize * 6,
-            data,
-        }],
-        pts: None,
-    };
+    let src = PbmImage::packed(w, h, PbmPixelFormat::Rgb48Le, w as usize * 6, data).unwrap();
     let bytes = encode_pbm(&src).unwrap();
     assert!(bytes.starts_with(b"P6\n"));
     let (back, fmt) = decode_pbm(&bytes).unwrap();
@@ -177,16 +142,7 @@ fn roundtrip_p7_rgba16() {
             }
         }
     }
-    let src = PbmImage {
-        width: w,
-        height: h,
-        pixel_format: PbmPixelFormat::Rgba64Le,
-        planes: vec![PbmPlane {
-            stride: w as usize * 8,
-            data,
-        }],
-        pts: None,
-    };
+    let src = PbmImage::packed(w, h, PbmPixelFormat::Rgba64Le, w as usize * 8, data).unwrap();
     let bytes = encode_pbm(&src).unwrap();
     assert!(bytes.starts_with(b"P7\n"));
     let (back, fmt) = decode_pbm(&bytes).unwrap();
@@ -220,16 +176,7 @@ fn roundtrip_p7_ya16() {
             data.extend_from_slice(&a.to_le_bytes());
         }
     }
-    let src = PbmImage {
-        width: w,
-        height: h,
-        pixel_format: PbmPixelFormat::Ya16Le,
-        planes: vec![PbmPlane {
-            stride: w as usize * 4,
-            data,
-        }],
-        pts: None,
-    };
+    let src = PbmImage::packed(w, h, PbmPixelFormat::Ya16Le, w as usize * 4, data).unwrap();
     let bytes = encode_pbm(&src).unwrap();
     assert!(bytes.starts_with(b"P7\n"));
     let (back, fmt) = decode_pbm(&bytes).unwrap();
@@ -268,16 +215,8 @@ fn ascii_p2_gray16_round_trip() {
         let v: u16 = (i.wrapping_mul(4099) & 0xFFFF) as u16;
         data.extend_from_slice(&v.to_le_bytes());
     }
-    let src = PbmImage {
-        width: w,
-        height: h,
-        pixel_format: PbmPixelFormat::Gray16Le,
-        planes: vec![PbmPlane {
-            stride: w as usize * 2,
-            data: data.clone(),
-        }],
-        pts: None,
-    };
+    let src =
+        PbmImage::packed(w, h, PbmPixelFormat::Gray16Le, w as usize * 2, data.clone()).unwrap();
     let bytes = encode_pbm_ascii(&src).unwrap();
     assert!(bytes.starts_with(b"P2\n4 3\n65535\n"));
     let (back, fmt) = decode_pbm(&bytes).unwrap();
@@ -295,16 +234,8 @@ fn ascii_p3_rgb48_round_trip() {
         let v: u16 = (i.wrapping_mul(7919) & 0xFFFF) as u16;
         data.extend_from_slice(&v.to_le_bytes());
     }
-    let src = PbmImage {
-        width: w,
-        height: h,
-        pixel_format: PbmPixelFormat::Rgb48Le,
-        planes: vec![PbmPlane {
-            stride: w as usize * 6,
-            data: data.clone(),
-        }],
-        pts: None,
-    };
+    let src =
+        PbmImage::packed(w, h, PbmPixelFormat::Rgb48Le, w as usize * 6, data.clone()).unwrap();
     let bytes = encode_pbm_ascii(&src).unwrap();
     assert!(bytes.starts_with(b"P3\n3 2\n65535\n"));
     let (back, fmt) = decode_pbm(&bytes).unwrap();
@@ -316,16 +247,14 @@ fn ascii_p3_rgb48_round_trip() {
 fn ascii_auto_picks_16bit_when_format_is_16bit() {
     // AutoAscii must route a Gray16Le image to P2 maxval 65535 rather
     // than rejecting it.
-    let src = PbmImage {
-        width: 2,
-        height: 1,
-        pixel_format: PbmPixelFormat::Gray16Le,
-        planes: vec![PbmPlane {
-            stride: 4,
-            data: vec![0x34, 0x12, 0xFF, 0xFF],
-        }],
-        pts: None,
-    };
+    let src = PbmImage::packed(
+        2,
+        1,
+        PbmPixelFormat::Gray16Le,
+        4,
+        vec![0x34, 0x12, 0xFF, 0xFF],
+    )
+    .unwrap();
     let bytes = encode_pbm_with_format(&src, PbmEncodeFormat::AutoAscii).unwrap();
     assert!(bytes.starts_with(b"P2\n2 1\n65535\n"));
     let (back, fmt) = decode_pbm(&bytes).unwrap();
@@ -474,16 +403,7 @@ fn explicit_pnm6_rejects_rgb48() {
     // What we want to verify: an unsupported pixel format under Pnm6
     // (e.g. Rgba) produces an Unsupported error rather than silent
     // misencode.
-    let img = PbmImage {
-        width: 1,
-        height: 1,
-        pixel_format: PbmPixelFormat::Rgba,
-        planes: vec![PbmPlane {
-            stride: 4,
-            data: vec![1, 2, 3, 4],
-        }],
-        pts: None,
-    };
+    let img = PbmImage::packed(1, 1, PbmPixelFormat::Rgba, 4, vec![1, 2, 3, 4]).unwrap();
     assert!(encode_pbm_with_format(&img, PbmEncodeFormat::Pnm6).is_err());
 }
 

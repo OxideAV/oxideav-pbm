@@ -49,11 +49,12 @@
 //! Run with:
 //!     cargo bench -p oxideav-pbm --bench encode
 
+#![allow(deprecated)]
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use oxideav_pbm::{
     encode_pbm, encode_pbm_ascii, encode_pbm_with_format, encode_pfm, PbmEncodeFormat, PbmImage,
-    PbmPixelFormat, PbmPlane,
+    PbmPixelFormat,
 };
 
 fn xorshift_byte(state: &mut u32) -> u8 {
@@ -64,36 +65,15 @@ fn xorshift_byte(state: &mut u32) -> u8 {
 }
 
 fn build_filled(width: u32, height: u32, format: PbmPixelFormat, seed: u32) -> PbmImage {
-    let w = width as usize;
     let h = height as usize;
-    let (stride, len) = match format {
-        PbmPixelFormat::MonoBlack => {
-            let rb = w.div_ceil(8);
-            (rb, rb * h)
-        }
-        PbmPixelFormat::Gray8 => (w, w * h),
-        PbmPixelFormat::Gray16Le => (w * 2, w * h * 2),
-        PbmPixelFormat::Rgb24 => (w * 3, w * h * 3),
-        PbmPixelFormat::Rgb48Le => (w * 6, w * h * 6),
-        PbmPixelFormat::Rgba | PbmPixelFormat::Bgra => (w * 4, w * h * 4),
-        PbmPixelFormat::Rgba64Le => (w * 8, w * h * 8),
-        PbmPixelFormat::Ya8 => (w * 2, w * h * 2),
-        PbmPixelFormat::Ya16Le => (w * 4, w * h * 4),
-        PbmPixelFormat::GrayF32 => (w * 4, w * h * 4),
-        PbmPixelFormat::RgbF32 => (w * 12, w * h * 12),
-    };
+    let stride = format.row_bytes(width).unwrap();
+    let len = stride * h;
     let mut data = vec![0u8; len];
     let mut state = seed;
     for byte in data.iter_mut() {
         *byte = xorshift_byte(&mut state);
     }
-    PbmImage {
-        width,
-        height,
-        pixel_format: format,
-        planes: vec![PbmPlane { stride, data }],
-        pts: None,
-    }
+    PbmImage::packed(width, height, format, stride, data).unwrap()
 }
 
 /// Build a finite-valued float image (no NaN / inf samples) so the PFM
@@ -117,17 +97,11 @@ fn build_float_image(width: u32, height: u32, channels: usize, seed: u32) -> Pbm
         }
     }
     let format = if channels == 3 {
-        PbmPixelFormat::RgbF32
+        PbmPixelFormat::RgbF32Le
     } else {
-        PbmPixelFormat::GrayF32
+        PbmPixelFormat::GrayF32Le
     };
-    PbmImage {
-        width,
-        height,
-        pixel_format: format,
-        planes: vec![PbmPlane { stride, data }],
-        pts: None,
-    }
+    PbmImage::packed(width, height, format, stride, data).unwrap()
 }
 
 fn bench_encode_p4_mono_640x480(c: &mut Criterion) {

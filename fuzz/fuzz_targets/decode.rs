@@ -1,37 +1,55 @@
 #![no_main]
 
-//! Fuzz: arbitrary bytes → `oxideav_pbm::decode_pbm`.
+//! Fuzz: arbitrary bytes → the contract read surface: `probe`, `info`,
+//! `decode`, `decode_rgb8`, `decode_rgba8`, `decode_with` (tight limits
+//! and `strict`).
 //!
-//! Contract: every public decode entry point MUST return a `Result` for
-//! malformed input — never panic, never abort, never over-allocate
-//! based on attacker-claimed dimensions. The decoder's
-//! `samples_to_plane` helper allocates `stride * height` bytes from the
-//! parsed header, so a malicious input with a huge width / height /
-//! depth field is the easiest panic surface.
+//! Contract: every public entry point MUST return a `Result` (or a
+//! `bool` for `probe`) for malformed input — never panic, never abort,
+//! never over-allocate based on attacker-claimed dimensions. The
+//! `DecodeOptions` limits are checked against the header before the
+//! plane is allocated, so a huge claimed geometry is the easiest panic /
+//! OOM surface and `info` must stay allocation-free on it.
 //!
 //! The harness imposes a 256 KiB input cap so libFuzzer doesn't burn
-//! cycles on inputs that the public API would already reject for being
-//! larger than any plausible image header. The full decoder pipeline
-//! exercised is:
-//!
-//!     parse_header
-//!       → decode_ascii / decode_binary (body decoder)
-//!         → samples_to_plane (per-format buffer allocator)
-//!
-//! Errors from any of the three layers are fine — the contract is that
-//! they surface as `Err(PbmError::…)` rather than a panic.
+//! cycles on inputs the public API would already reject for being larger
+//! than any plausible image header.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_pbm::decode_pbm;
+use oxideav_pbm::{decode, decode_rgb8, decode_rgba8, decode_with, info, probe, DecodeOptions};
 
 fuzz_target!(|data: &[u8]| {
-    // 256 KiB cap. The Netpbm header is at most ~80 bytes for any
-    // legitimate file; the payload can be arbitrarily large but for
-    // panic-discovery we only need a few-KiB window. The cap also keeps
-    // the per-input runtime low enough that libFuzzer reaches deeper
-    // coverage in the available time budget.
     if data.len() > 256 * 1024 {
         return;
     }
-    let _ = decode_pbm(data);
+    let _ = probe(data);
+    let info = info(data);
+    let img = decode(data);
+    // `info` and `decode` must agree on the first image's geometry and
+    // layout whenever both succeed; `decode` may fail where `info`
+    // succeeds (truncated body), never the other way round.
+    match (&info, &img) {
+        (Ok(i), Ok(img)) => {
+            assert_eq!((i.width, i.height), (img.width, img.height));
+            assert_eq!(i.format, img.format);
+            // Conversions are infallible on a decoder-produced image.
+            let rgba = img.to_rgba8();
+            assert_eq!(rgba.len(), img.width as usize * img.height as usize * 4);
+            let rgb = img.to_rgb8();
+            assert_eq!(rgb.len(), img.width as usize * img.height as usize * 3);
+        }
+        (Err(_), Ok(_)) => panic!("decode succeeded where info failed"),
+        _ => {}
+    }
+    let _ = decode_rgb8(data);
+    let _ = decode_rgba8(data);
+    let tight = DecodeOptions::new()
+        .with_max_width(64)
+        .with_max_height(64)
+        .with_max_pixels(4096u64)
+        .with_max_bytes(1u64 << 16)
+        .with_strict(true);
+    if let Ok(i) = decode_with(data, &tight) {
+        assert!(i.width <= 64 && i.height <= 64);
+    }
 });

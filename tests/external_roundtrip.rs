@@ -5,10 +5,11 @@
 //!
 //! Skips silently when none of the tools are on `PATH`.
 
+#![allow(deprecated)]
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use oxideav_pbm::{decode_pbm, encode_pbm, PbmImage, PbmPixelFormat, PbmPlane};
+use oxideav_pbm::{decode_pbm, encode_pbm, PbmImage, PbmPixelFormat};
 
 fn have(prog: &str) -> bool {
     Command::new(prog)
@@ -50,13 +51,7 @@ fn pnmtoplainpnm_roundtrip_p6() {
             data.push(((x ^ y) * 17) as u8);
         }
     }
-    let src = PbmImage {
-        width: 8,
-        height: 6,
-        pixel_format: PbmPixelFormat::Rgb24,
-        planes: vec![PbmPlane { stride: 24, data }],
-        pts: None,
-    };
+    let src = PbmImage::packed(8, 6, PbmPixelFormat::Rgb24, 24, data).unwrap();
     let bin = encode_pbm(&src).unwrap();
     let plain = match pipe_through("pnmtoplainpnm", &[], &bin) {
         Some(v) => v,

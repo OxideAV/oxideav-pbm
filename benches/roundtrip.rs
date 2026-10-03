@@ -30,11 +30,10 @@
 //! Run with:
 //!     cargo bench -p oxideav-pbm --bench roundtrip
 
+#![allow(deprecated)]
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use oxideav_pbm::{
-    decode_pbm, decode_pfm, encode_pbm, encode_pfm, PbmImage, PbmPixelFormat, PbmPlane,
-};
+use oxideav_pbm::{decode_pbm, decode_pfm, encode_pbm, encode_pfm, PbmImage, PbmPixelFormat};
 
 fn xorshift_byte(state: &mut u32) -> u8 {
     *state ^= *state << 13;
@@ -44,36 +43,15 @@ fn xorshift_byte(state: &mut u32) -> u8 {
 }
 
 fn build_filled(width: u32, height: u32, format: PbmPixelFormat, seed: u32) -> PbmImage {
-    let w = width as usize;
     let h = height as usize;
-    let (stride, len) = match format {
-        PbmPixelFormat::MonoBlack => {
-            let rb = w.div_ceil(8);
-            (rb, rb * h)
-        }
-        PbmPixelFormat::Gray8 => (w, w * h),
-        PbmPixelFormat::Gray16Le => (w * 2, w * h * 2),
-        PbmPixelFormat::Rgb24 => (w * 3, w * h * 3),
-        PbmPixelFormat::Rgb48Le => (w * 6, w * h * 6),
-        PbmPixelFormat::Rgba | PbmPixelFormat::Bgra => (w * 4, w * h * 4),
-        PbmPixelFormat::Rgba64Le => (w * 8, w * h * 8),
-        PbmPixelFormat::Ya8 => (w * 2, w * h * 2),
-        PbmPixelFormat::Ya16Le => (w * 4, w * h * 4),
-        PbmPixelFormat::GrayF32 => (w * 4, w * h * 4),
-        PbmPixelFormat::RgbF32 => (w * 12, w * h * 12),
-    };
+    let stride = format.row_bytes(width).unwrap();
+    let len = stride * h;
     let mut data = vec![0u8; len];
     let mut state = seed;
     for byte in data.iter_mut() {
         *byte = xorshift_byte(&mut state);
     }
-    PbmImage {
-        width,
-        height,
-        pixel_format: format,
-        planes: vec![PbmPlane { stride, data }],
-        pts: None,
-    }
+    PbmImage::packed(width, height, format, stride, data).unwrap()
 }
 
 fn rt(image: &PbmImage) {
@@ -102,17 +80,11 @@ fn build_float_image(width: u32, height: u32, channels: usize, seed: u32) -> Pbm
         }
     }
     let format = if channels == 3 {
-        PbmPixelFormat::RgbF32
+        PbmPixelFormat::RgbF32Le
     } else {
-        PbmPixelFormat::GrayF32
+        PbmPixelFormat::GrayF32Le
     };
-    PbmImage {
-        width,
-        height,
-        pixel_format: format,
-        planes: vec![PbmPlane { stride, data }],
-        pts: None,
-    }
+    PbmImage::packed(width, height, format, stride, data).unwrap()
 }
 
 /// PFM end-to-end roundtrip exercising the chosen byte order on both

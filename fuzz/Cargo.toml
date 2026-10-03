@@ -18,28 +18,28 @@ cargo-fuzz = true
 # point must return a `Result` for malformed input — never panic, never
 # abort, never over-allocate based on attacker-claimed dimensions.
 #
-# Three independent decode entry points are fuzzed because they map to
-# distinct parser state machines:
+# Independent entry points are fuzzed because they map to distinct
+# parser state machines:
 #
-#   * `decode_pbm`       — full pipeline: `parse_header` → ASCII/binary
-#                          body decoder → `samples_to_plane`. Drives
-#                          every code path the public API exposes,
-#                          including the `samples_to_plane` per-
-#                          pixel-format buffer allocator.
+#   * `decode` (+ `probe` / `info` / `decode_rgb8` / `decode_rgba8` /
+#                          `decode_with`) — the contract read surface:
+#                          `parse_header` → limits → ASCII/binary body
+#                          decoder → `samples_to_plane`. Drives every
+#                          code path the public API exposes, including
+#                          the per-pixel-format buffer allocator.
 #   * `parse_header`     — header-only: rejects bad magic, validates
 #                          maxval / depth ranges, validates PAM
 #                          TUPLTYPE-vs-depth consistency. Driven
 #                          directly so a single-byte header mutation
 #                          that wouldn't survive end-to-end decode
 #                          still gets exercised at the parser.
-#   * `encode_roundtrip` — feeds arbitrary bytes through the encoder by
+#   * `encode_roundtrip` — feeds arbitrary bytes through `encode` by
 #                          building a synthetic `PbmImage` whose plane
 #                          data is the fuzz input and whose
-#                          width/height/format are taken from the first
-#                          few bytes. Catches encoder panics on
-#                          mismatched stride / plane-data sizes for
-#                          every `PbmPixelFormat` × `PbmEncodeFormat`
-#                          combination.
+#                          width/height/format/`EncodeOptions` are taken
+#                          from the first few bytes, then decodes the
+#                          output. Catches encoder panics for every
+#                          `PixelFormat` × flavour combination.
 [dependencies]
 libfuzzer-sys = "0.4"
 
@@ -54,8 +54,9 @@ members = ["."]
 [profile.release]
 debug = 1
 
-# End-to-end decode — drives `decode_pbm` on arbitrary bytes. The full
-# parser pipeline (`parse_header` → ASCII/binary body decoder →
+# End-to-end decode — drives `probe` / `info` / `decode` / `decode_rgb8` /
+# `decode_rgba8` / `decode_with` on arbitrary bytes. The full parser
+# pipeline (`parse_header` → limits → ASCII/binary body decoder →
 # `samples_to_plane` buffer allocator) is exercised.
 [[bin]]
 name = "decode"
@@ -73,11 +74,11 @@ test = false
 doc = false
 
 # Encoder — builds a synthetic `PbmImage` from arbitrary bytes (first
-# byte picks `PbmPixelFormat`, next two are width LE, next two are
-# height LE, remainder is plane data) and runs it through every
-# `PbmEncodeFormat` variant. Catches encoder panics on mismatched
-# stride / plane-size combinations and exercises the `Unsupported`
-# rejection paths for every format × pixel-format pair.
+# byte picks `PixelFormat`, next two are width LE, next two are height
+# LE, then flavour / stride / maxval selectors, remainder is plane data)
+# and runs it through `encode` with the selected `EncodeOptions`, then
+# `decode`. Exercises the `Unsupported` rejection paths for every
+# flavour × layout pair.
 [[bin]]
 name = "encode_roundtrip"
 path = "fuzz_targets/encode_roundtrip.rs"
@@ -97,8 +98,8 @@ path = "fuzz_targets/pfm.rs"
 test = false
 doc = false
 
-# Multi-image stream walk — drives `decode_pbm_multi` /
-# `decode_pbm_consumed` on arbitrary bytes. Concatenated Netpbm/PAM/PFM
+# Multi-image stream walk — drives `decode_all` / `info` on arbitrary
+# bytes. Concatenated Netpbm/PAM/PFM
 # images are walked by a loop that skips inter-image whitespace and
 # advances `offset += consumed`; the unique surface is the per-image
 # byte-accounting (deterministic length for binary/PFM magics, ASCII
@@ -111,7 +112,7 @@ path = "fuzz_targets/multi.rs"
 test = false
 doc = false
 
-# Recode fixed-point — `decode_pbm` → `encode_pbm` → `decode_pbm`.
+# Recode fixed-point — `decode` → `encode` → `decode`.
 # Where `decode` and `encode_roundtrip` each fuzz one direction for
 # panic-freedom, this target closes the loop and asserts a *semantic*
 # invariant: any image the decoder produces must re-encode + re-decode

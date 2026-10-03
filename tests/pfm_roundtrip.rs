@@ -1,18 +1,19 @@
 //! End-to-end Portable FloatMap (`Pf` / `PF`) round-trips through the
 //! public crate API, including the unified `decode_pbm` dispatch path.
 
+#![allow(deprecated)]
 use oxideav_pbm::{
     apply_pfm_scale, decode_pbm, decode_pfm, decode_pfm_scaled, encode_pbm, encode_pfm, PbmImage,
-    PbmPixelFormat, PbmPlane,
+    PbmPixelFormat,
 };
 
 /// Build a float image whose samples encode their coordinates so a row
 /// flip or byte swap is observable.
 fn float_image(w: u32, h: u32, ch: usize) -> PbmImage {
     let format = if ch == 3 {
-        PbmPixelFormat::RgbF32
+        PbmPixelFormat::RgbF32Le
     } else {
-        PbmPixelFormat::GrayF32
+        PbmPixelFormat::GrayF32Le
     };
     let stride = w as usize * ch * 4;
     let mut data = vec![0u8; stride * h as usize];
@@ -25,13 +26,7 @@ fn float_image(w: u32, h: u32, ch: usize) -> PbmImage {
             }
         }
     }
-    PbmImage {
-        width: w,
-        height: h,
-        pixel_format: format,
-        planes: vec![PbmPlane { stride, data }],
-        pts: None,
-    }
+    PbmImage::packed(w, h, format, stride, data).unwrap()
 }
 
 #[test]
@@ -41,7 +36,7 @@ fn pf_little_endian_roundtrip_via_decode_pbm() {
     assert!(bytes.starts_with(b"Pf\n7 5\n-1.0\n"));
     // The unified decode entry point dispatches PFM to the float decoder.
     let (back, fmt) = decode_pbm(&bytes).unwrap();
-    assert_eq!(fmt, PbmPixelFormat::GrayF32);
+    assert_eq!(fmt, PbmPixelFormat::GrayF32Le);
     assert_eq!(back.planes[0].data, img.planes[0].data);
 }
 

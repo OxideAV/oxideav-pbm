@@ -12,6 +12,7 @@
 //! PNM and PAM headers, the PAM `DEPTH` lower bound, and a handful of
 //! truncation / missing-separator shapes.
 
+#![allow(deprecated)]
 use oxideav_pbm::{decode_pbm, parse_header, PbmError};
 
 /// Assert `decode_pbm(buf)` fails with `InvalidData` whose message

@@ -24,21 +24,12 @@
 //! decoder's output set and cannot be a fixed point. That direction is
 //! covered separately below.
 
-use oxideav_pbm::{decode_pbm, encode_pbm, PbmImage, PbmPixelFormat, PbmPlane};
+#![allow(deprecated)]
+use oxideav_pbm::{decode_pbm, encode_pbm, PbmImage, PbmPixelFormat};
 
 /// Minimum (tight) row stride the decoder emits for `(format, width)`.
 fn tight_stride(format: PbmPixelFormat, width: usize) -> usize {
-    match format {
-        PbmPixelFormat::MonoBlack => width.div_ceil(8),
-        PbmPixelFormat::Gray8 => width,
-        PbmPixelFormat::Gray16Le | PbmPixelFormat::Ya8 => width * 2,
-        PbmPixelFormat::Rgb24 => width * 3,
-        PbmPixelFormat::Ya16Le | PbmPixelFormat::GrayF32 => width * 4,
-        PbmPixelFormat::Rgb48Le => width * 6,
-        PbmPixelFormat::Rgba | PbmPixelFormat::Bgra => width * 4,
-        PbmPixelFormat::Rgba64Le => width * 8,
-        PbmPixelFormat::RgbF32 => width * 12,
-    }
+    format.row_bytes(width as u32).unwrap()
 }
 
 /// Build a decoder-shaped image: tight stride, deterministic bytes.
@@ -59,7 +50,7 @@ fn make_image(format: PbmPixelFormat, w: u32, h: u32) -> PbmImage {
     // subnormal; those still round-trip bit-exactly (PFM samples are
     // copied verbatim), but keep the payload finite so the assertion is
     // meaningful rather than accidentally comparing NaN payloads.
-    if matches!(format, PbmPixelFormat::GrayF32 | PbmPixelFormat::RgbF32) {
+    if matches!(format, PbmPixelFormat::GrayF32Le | PbmPixelFormat::RgbF32Le) {
         for (i, chunk) in data.chunks_exact_mut(4).enumerate() {
             let v = (i as f32) * 0.5 - 3.0;
             chunk.copy_from_slice(&v.to_le_bytes());
@@ -79,13 +70,7 @@ fn make_image(format: PbmPixelFormat, w: u32, h: u32) -> PbmImage {
             }
         }
     }
-    PbmImage {
-        width: w,
-        height: h,
-        pixel_format: format,
-        planes: vec![PbmPlane { stride, data }],
-        pts: None,
-    }
+    PbmImage::packed(w, h, format, stride, data).unwrap()
 }
 
 fn assert_fixed_point(format: PbmPixelFormat, w: u32, h: u32) {
@@ -98,7 +83,7 @@ fn assert_fixed_point(format: PbmPixelFormat, w: u32, h: u32) {
     assert_eq!(back.width, img.width, "width drifted for {format:?}");
     assert_eq!(back.height, img.height, "height drifted for {format:?}");
     assert_eq!(
-        back.pixel_format, img.pixel_format,
+        back.format, img.format,
         "image format drifted for {format:?}"
     );
     assert_eq!(
@@ -134,8 +119,8 @@ const DECODE_PRODUCIBLE: &[PbmPixelFormat] = &[
     PbmPixelFormat::Rgba64Le,
     PbmPixelFormat::Ya8,
     PbmPixelFormat::Ya16Le,
-    PbmPixelFormat::GrayF32,
-    PbmPixelFormat::RgbF32,
+    PbmPixelFormat::GrayF32Le,
+    PbmPixelFormat::RgbF32Le,
 ];
 
 #[test]
@@ -199,16 +184,7 @@ fn bgra_input_decodes_back_as_channel_swapped_rgba() {
         let a = (i * 10 + 3) as u8;
         data.extend_from_slice(&[b, g, r, a]); // BGRA on disk in-memory
     }
-    let img = PbmImage {
-        width: w,
-        height: h,
-        pixel_format: PbmPixelFormat::Bgra,
-        planes: vec![PbmPlane {
-            stride: (w * 4) as usize,
-            data: data.clone(),
-        }],
-        pts: None,
-    };
+    let img = PbmImage::packed(w, h, PbmPixelFormat::Bgra, (w * 4) as usize, data.clone()).unwrap();
     let bytes = encode_pbm(&img).unwrap();
     let (back, fmt) = decode_pbm(&bytes).unwrap();
     assert_eq!(fmt, PbmPixelFormat::Rgba);

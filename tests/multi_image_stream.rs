@@ -7,10 +7,11 @@
 //! emit for individual images and assert that the round-trip recovers
 //! every image's pixels exactly, regardless of the per-image magic.
 
+#![allow(deprecated)]
 use oxideav_pbm::{
     decode_pbm, decode_pbm_consumed, decode_pbm_header_consumed, decode_pbm_multi,
     decode_pbm_multi_with_headers, encode_pbm, encode_pbm_ascii, encode_pfm, Magic, PbmImage,
-    PbmPixelFormat, PbmPlane, Tupltype,
+    PbmPixelFormat, Tupltype,
 };
 
 fn gray8(w: u32, h: u32, seed: u8) -> PbmImage {
@@ -20,16 +21,7 @@ fn gray8(w: u32, h: u32, seed: u8) -> PbmImage {
             data.push(((x.wrapping_mul(3) + y.wrapping_mul(5)) as u8).wrapping_add(seed));
         }
     }
-    PbmImage {
-        width: w,
-        height: h,
-        pixel_format: PbmPixelFormat::Gray8,
-        planes: vec![PbmPlane {
-            stride: w as usize,
-            data,
-        }],
-        pts: None,
-    }
+    PbmImage::packed(w, h, PbmPixelFormat::Gray8, w as usize, data).unwrap()
 }
 
 fn rgb24(w: u32, h: u32, seed: u8) -> PbmImage {
@@ -41,16 +33,7 @@ fn rgb24(w: u32, h: u32, seed: u8) -> PbmImage {
             data.push((x as u8 ^ y as u8).wrapping_add(seed));
         }
     }
-    PbmImage {
-        width: w,
-        height: h,
-        pixel_format: PbmPixelFormat::Rgb24,
-        planes: vec![PbmPlane {
-            stride: w as usize * 3,
-            data,
-        }],
-        pts: None,
-    }
+    PbmImage::packed(w, h, PbmPixelFormat::Rgb24, w as usize * 3, data).unwrap()
 }
 
 fn gray16(w: u32, h: u32, seed: u16) -> PbmImage {
@@ -61,16 +44,7 @@ fn gray16(w: u32, h: u32, seed: u16) -> PbmImage {
             data.extend_from_slice(&v.to_le_bytes());
         }
     }
-    PbmImage {
-        width: w,
-        height: h,
-        pixel_format: PbmPixelFormat::Gray16Le,
-        planes: vec![PbmPlane {
-            stride: w as usize * 2,
-            data,
-        }],
-        pts: None,
-    }
+    PbmImage::packed(w, h, PbmPixelFormat::Gray16Le, w as usize * 2, data).unwrap()
 }
 
 fn grayf32(w: u32, h: u32, seed: f32) -> PbmImage {
@@ -81,16 +55,7 @@ fn grayf32(w: u32, h: u32, seed: f32) -> PbmImage {
             data.extend_from_slice(&v.to_le_bytes());
         }
     }
-    PbmImage {
-        width: w,
-        height: h,
-        pixel_format: PbmPixelFormat::GrayF32,
-        planes: vec![PbmPlane {
-            stride: w as usize * 4,
-            data,
-        }],
-        pts: None,
-    }
+    PbmImage::packed(w, h, PbmPixelFormat::GrayF32Le, w as usize * 4, data).unwrap()
 }
 
 #[test]
@@ -184,9 +149,9 @@ fn pfm_images_in_stream() {
 
     let imgs = decode_pbm_multi(&stream).unwrap();
     assert_eq!(imgs.len(), 2);
-    assert_eq!(imgs[0].1, PbmPixelFormat::GrayF32);
+    assert_eq!(imgs[0].1, PbmPixelFormat::GrayF32Le);
     assert_eq!(imgs[0].0.planes[0].data, a.planes[0].data);
-    assert_eq!(imgs[1].1, PbmPixelFormat::GrayF32);
+    assert_eq!(imgs[1].1, PbmPixelFormat::GrayF32Le);
     assert_eq!(imgs[1].0.planes[0].data, b.planes[0].data);
 }
 
@@ -266,16 +231,7 @@ fn rgba8(w: u32, h: u32, seed: u8) -> PbmImage {
             data.push(if (x + y) & 1 == 0 { 255 } else { 64 });
         }
     }
-    PbmImage {
-        width: w,
-        height: h,
-        pixel_format: PbmPixelFormat::Rgba,
-        planes: vec![PbmPlane {
-            stride: w as usize * 4,
-            data,
-        }],
-        pts: None,
-    }
+    PbmImage::packed(w, h, PbmPixelFormat::Rgba, w as usize * 4, data).unwrap()
 }
 
 #[test]
@@ -326,7 +282,7 @@ fn header_consumed_carries_pfm_byte_order_and_scale() {
     let bytes = encode_pfm(&a, true, 1.0).unwrap();
 
     let (img, fmt, header, consumed) = decode_pbm_header_consumed(&bytes).unwrap();
-    assert_eq!(fmt, PbmPixelFormat::GrayF32);
+    assert_eq!(fmt, PbmPixelFormat::GrayF32Le);
     assert_eq!(header.magic, Magic::PfPfmGrayFloat);
     let pfm = header
         .pfm
@@ -361,7 +317,7 @@ fn multi_with_headers_keeps_every_header() {
     assert_eq!(imgs[1].2.tupltype, Some(Tupltype::RgbAlpha));
     assert_eq!(imgs[1].0.planes[0].data, b.planes[0].data);
 
-    assert_eq!(imgs[2].1, PbmPixelFormat::GrayF32);
+    assert_eq!(imgs[2].1, PbmPixelFormat::GrayF32Le);
     assert_eq!(imgs[2].2.magic, Magic::PfPfmGrayFloat);
     let pfm = imgs[2].2.pfm.expect("PFM header");
     assert!(!pfm.little_endian); // encoded big-endian
