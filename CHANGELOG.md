@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `encode_all(&[Frame], &EncodeOptions) -> Result<Vec<u8>, Error>`: the
+  mirror of `decode_all`, writing the frames' images back to back as one
+  concatenated Netpbm / PAM / PFM stream (each as `encode` would under
+  the same options; `Frame::header` / `delay` are not consulted).
+  `Frame::from_image(PbmImage)` wraps a caller-built image with the
+  header the default encoder writes for it. Pinned:
+  `decode_all(encode_all(frames)) == frames` for every decodable layout.
+- `Cargo.toml` `exclude = ["/tests", "/fuzz"]` (crates.io 10 MiB cap).
+
 - Round 467: the `IMAGE_CRATE_API` contract surface at the crate root —
   `probe`, `info -> ImageInfo`, `decode` / `decode_with(&DecodeOptions)`
   / `decode_rgb8 -> RgbImage` / `decode_rgba8 -> RgbaImage` /

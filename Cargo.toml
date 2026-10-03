@@ -9,6 +9,8 @@ homepage = "https://github.com/OxideAV/oxideav-pbm"
 authors = ["Mark Karpeles"]
 description = "Pure-Rust Netpbm (PBM/PGM/PPM/PNM/PAM) image codec for the oxideav framework"
 readme = "README.md"
+# crates.io caps packages at 10 MiB; fixtures and the fuzz tree stay in git only.
+exclude = ["/tests", "/fuzz"]
 keywords = ["multimedia", "image", "netpbm", "codec", "pure-rust"]
 categories = ["multimedia::encoding", "multimedia::images"]
 

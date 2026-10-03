@@ -47,6 +47,7 @@ if oxideav_pbm::probe(&bytes) {
 | `decode_from` | `fn<R: Read>(R) -> Result<PbmImage, Error>` |
 | `encode` | `fn(&PbmImage, &EncodeOptions) -> Result<Vec<u8>, Error>` — as given, never a silent conversion |
 | `encode_rgb8` / `encode_rgba8` | `fn(w, h, &[u8], &EncodeOptions)` — P6 / P7 `RGB_ALPHA` (never a bitmap or graymap) |
+| `encode_all` | `fn(&[Frame], &EncodeOptions) -> Result<Vec<u8>, Error>` — the images back to back as one concatenated stream, each written as `encode` would under `opts`; the mirror of `decode_all` (`Frame::from_image` wraps a caller-built image) |
 | `encode_to` | `fn<W: Write>(&PbmImage, &EncodeOptions, W) -> Result<(), Error>` |
 | `PbmImage` | `{ width, height, format: PixelFormat, planes: Vec<Plane>, color: ColorInfo, metadata: Metadata }` (no palette: Netpbm has none) with `new` / `packed` / `from_rgb8` / `from_rgba8` (all `Result`, geometry validated), `width()` / `height()` / `format()` / `stride()`, `as_bytes()` / `into_raw()`, `to_rgb8()` / `to_rgba8()`, `validate()` |
 | `PixelFormat` | `= PbmPixelFormat`: `MonoBlack`, `MonoWhite`, `Gray8`, `Gray16Le`, `Ya8`, `Ya16Le`, `Rgb24`, `Rgb48Le`, `Rgba`, `Bgra`, `Rgba64Le`, `GrayF32Le`, `RgbF32Le` (names mirror `oxideav_core::PixelFormat`) |
@@ -230,6 +231,12 @@ ASCII and binary magics. A `#` between images is not a valid separator
 (the magic must be the first two bytes of each image) and surfaces a
 malformed-stream error. The framework `Decoder` honours multi-image
 streams too: one packet yields one `receive_frame` result per image.
+
+`encode_all(&frames, &opts)` writes such a stream: every frame's image
+as `encode` would write it under the same options, back to back (binary
+bodies are self-delimiting by length, plain bodies by sample count and
+their trailing newline). `decode_all(encode_all(frames)) == frames` for
+every layout the decoder produces (`tests/image_crate_api.rs`).
 
 ## PAM tuple-type handling
 

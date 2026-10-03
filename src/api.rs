@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 
 use crate::decoder::{decode_one, decode_stream, is_ascii_ws, native_format};
 use crate::encoder::encode_image;
-use crate::error::Result;
+use crate::error::{PbmError as Error, Result};
 use crate::header::{parse_header, probe_is_netpbm, Header};
 use crate::image::{ColorInfo, Frame, ImageInfo, PbmImage, RgbImage, RgbaImage};
 use crate::options::{DecodeOptions, EncodeOptions};
@@ -217,6 +217,30 @@ pub fn encode_rgb8(width: u32, height: u32, rgb: &[u8], opts: &EncodeOptions) ->
 pub fn encode_rgba8(width: u32, height: u32, rgba: &[u8], opts: &EncodeOptions) -> Result<Vec<u8>> {
     let img = PbmImage::from_rgba8(width, height, rgba.to_vec())?;
     encode(&img, opts)
+}
+
+/// Write several images as one concatenated Netpbm / PAM / PFM stream
+/// — the mirror of [`decode_all`]. Each `frames[i].image` is written
+/// with [`encode`] under `opts` (so the same flavour applies to every
+/// image; a mixed-layout slice yields mixed magics) and the files are
+/// laid back-to-back, which every Netpbm reader of sequences accepts
+/// (each image is self-delimiting: binary bodies by length, plain
+/// bodies by their sample count and trailing newline). `Frame::header`
+/// and `delay` are not consulted — the written header follows `opts`,
+/// exactly as [`encode`]'s does. An empty slice is
+/// [`Error::InvalidData`]; a layout the chosen flavour cannot carry
+/// fails the whole stream with [`Error::Unsupported`].
+pub fn encode_all(frames: &[Frame], opts: &EncodeOptions) -> Result<Vec<u8>> {
+    if frames.is_empty() {
+        return Err(Error::invalid(
+            "Netpbm: encode_all needs at least one frame",
+        ));
+    }
+    let mut out = Vec::new();
+    for frame in frames {
+        out.extend_from_slice(&encode_image(&frame.image, opts)?);
+    }
+    Ok(out)
 }
 
 /// [`encode`] straight into a writer.

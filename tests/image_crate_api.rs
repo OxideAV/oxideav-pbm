@@ -7,9 +7,10 @@
 //! delegating to the same functions.
 
 use oxideav_pbm::{
-    decode, decode_all, decode_from, decode_rgb8, decode_rgba8, decode_with, encode, encode_rgb8,
-    encode_rgba8, encode_to, info, probe, ColorInfo, ColorRange, DecodeOptions, EncodeOptions,
-    Error, Frame, ImageInfo, Metadata, PbmImage, PixelFormat, Plane, RgbImage, RgbaImage,
+    decode, decode_all, decode_from, decode_rgb8, decode_rgba8, decode_with, encode, encode_all,
+    encode_rgb8, encode_rgba8, encode_to, info, probe, ColorInfo, ColorRange, DecodeOptions,
+    EncodeOptions, Error, Frame, ImageInfo, Metadata, PbmImage, PixelFormat, Plane, RgbImage,
+    RgbaImage,
 };
 
 fn checker(w: u32, h: u32) -> Vec<u8> {
@@ -255,6 +256,71 @@ fn decode_all_walks_concatenated_images() {
     assert!(frames[2].header.pfm.is_some());
     // `decode` is the first image only.
     assert_eq!(decode(&stream).unwrap(), frames[0].image);
+}
+
+#[test]
+fn encode_all_mirrors_decode_all_losslessly() {
+    // Every layout the decoder produces, back to back, in one stream.
+    let frames: Vec<Frame> = PixelFormat::ALL
+        .iter()
+        .filter(|f| !matches!(f, PixelFormat::MonoWhite | PixelFormat::Bgra))
+        .enumerate()
+        .map(|(i, &f)| Frame::from_image(sample_image(f, 5 + i as u32, 3)))
+        .collect();
+    let stream = encode_all(&frames, &EncodeOptions::default()).unwrap();
+    assert!(probe(&stream));
+    assert_eq!(info(&stream).unwrap().frames as usize, frames.len());
+    let back = decode_all(&stream).unwrap();
+    assert_eq!(back.len(), frames.len());
+    for (b, f) in back.iter().zip(&frames) {
+        assert_eq!(b.image, f.image, "{:?}", f.image.format);
+        assert_eq!(b.delay, None);
+        // `Frame::from_image` predicted the header the stream carries.
+        assert_eq!(b.header.magic, f.header.magic);
+        assert_eq!(b.header.maxval, f.header.maxval);
+        assert_eq!(b.header.depth, f.header.depth);
+        assert_eq!(b.header.tupltype, f.header.tupltype);
+        assert_eq!(b.header.data_offset, f.header.data_offset);
+        assert_eq!(b.header.pfm, f.header.pfm);
+    }
+    // Same bytes as per-image `encode` laid back to back.
+    let joined: Vec<u8> = frames
+        .iter()
+        .flat_map(|f| encode(&f.image, &EncodeOptions::default()).unwrap())
+        .collect();
+    assert_eq!(stream, joined);
+    // Options reach every image (plain forms end in a newline, so the
+    // next magic is still found).
+    let ints: Vec<Frame> = [
+        PixelFormat::Gray8,
+        PixelFormat::Rgb24,
+        PixelFormat::Gray16Le,
+    ]
+    .iter()
+    .map(|&f| Frame::from_image(sample_image(f, 4, 2)))
+    .collect();
+    let ascii = encode_all(&ints, &EncodeOptions::new().with_ascii(true)).unwrap();
+    let back = decode_all(&ascii).unwrap();
+    assert_eq!(back.len(), 3);
+    assert!(back.iter().all(|b| b.header.magic.is_ascii()));
+    for (b, f) in back.iter().zip(&ints) {
+        assert_eq!(b.image, f.image);
+    }
+    // Frames straight from `decode_all` re-encode to the same stream.
+    assert_eq!(
+        encode_all(&decode_all(&stream).unwrap(), &EncodeOptions::default()).unwrap(),
+        stream
+    );
+    // Empty input and an uncarriable layout are errors.
+    assert!(matches!(
+        encode_all(&[], &EncodeOptions::default()),
+        Err(Error::InvalidData(_))
+    ));
+    let rgba = Frame::from_image(sample_image(PixelFormat::Rgba, 2, 2));
+    assert!(matches!(
+        encode_all(&[rgba], &EncodeOptions::new().with_ascii(true)),
+        Err(Error::Unsupported(_))
+    ));
 }
 
 #[test]

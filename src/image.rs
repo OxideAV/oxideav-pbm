@@ -1001,6 +1001,17 @@ impl Frame {
             header,
         }
     }
+
+    /// Wrap a caller-built image for [`crate::encode_all`]: `header`
+    /// describes the image as `encode` writes it under
+    /// `EncodeOptions::default()` (the raw natural magic, natural
+    /// `MAXVAL`, PAM `TUPLTYPE` for alpha layouts, little-endian scale
+    /// `1` for float), which is what [`crate::decode_all`] reports back
+    /// for that output.
+    pub fn from_image(image: PbmImage) -> Self {
+        let header = crate::encoder::natural_header(&image);
+        Self::new(image, header)
+    }
 }
 
 #[cfg(test)]

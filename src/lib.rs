@@ -98,7 +98,7 @@ pub const CODEC_ID_STR: &str = "pbm";
 // ---- the contract surface (IMAGE_CRATE_API) ---------------------------------
 pub use api::{
     decode, decode_all, decode_all_with, decode_from, decode_rgb8, decode_rgba8, decode_with,
-    encode, encode_rgb8, encode_rgba8, encode_to, info, probe,
+    encode, encode_all, encode_rgb8, encode_rgba8, encode_to, info, probe,
 };
 pub use error::{Error, PbmError, Result};
 pub use image::{

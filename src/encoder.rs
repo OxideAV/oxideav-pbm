@@ -150,6 +150,45 @@ fn natural_maxval(fmt: PbmPixelFormat) -> u32 {
     }
 }
 
+/// The header `encode_image(image, &EncodeOptions::default())` writes
+/// for `image`, parsed back as [`crate::decode_all`] would report it
+/// (so `data_offset` is the header's own byte length). Backs
+/// [`crate::Frame::from_image`]; validates nothing beyond the layout.
+pub(crate) fn natural_header(image: &PbmImage) -> crate::header::Header {
+    let fmt = image.format;
+    let w = image.width as usize;
+    let h = image.height as usize;
+    let bytes = if fmt.is_float() {
+        let magic = if fmt == PbmPixelFormat::RgbF32Le {
+            Magic::PFPfmRgbFloat
+        } else {
+            Magic::PfPfmGrayFloat
+        };
+        let mut out = Vec::with_capacity(32);
+        out.extend_from_slice(magic.wire_bytes());
+        // The default options write little-endian samples, scale 1.
+        out.extend_from_slice(format!("\n{w} {h}\n-1.0\n").as_bytes());
+        out
+    } else if fmt.has_alpha() {
+        header_pam(
+            w,
+            h,
+            fmt.channels() as u32,
+            natural_maxval(fmt),
+            standard_tupltype(fmt),
+        )
+    } else {
+        let magic = match fmt {
+            PbmPixelFormat::MonoBlack | PbmPixelFormat::MonoWhite => Magic::P4BinaryBitmap,
+            PbmPixelFormat::Gray8 | PbmPixelFormat::Gray16Le => Magic::P5BinaryGraymap,
+            _ => Magic::P6BinaryPixmap,
+        };
+        let maxval = (!fmt.is_bilevel()).then(|| natural_maxval(fmt));
+        header_pnm(magic, w, h, maxval)
+    };
+    crate::header::parse_header(&bytes).expect("the encoder's own header parses")
+}
+
 /// Invert a bilevel plane's bits (`MonoWhite` → the `MonoBlack` / P4
 /// wire sense), row by row, keeping the stride.
 fn invert_bilevel(plane: &PbmPlane, w: usize, h: usize) -> PbmPlane {
