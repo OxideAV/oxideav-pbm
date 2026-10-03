@@ -17,13 +17,13 @@
 //!   layout.
 //!
 //! In memory the samples are always stored **little-endian** (the
-//! [`PbmPixelFormat::GrayF32`] / [`PbmPixelFormat::RgbF32`] contract),
+//! [`PbmPixelFormat::GrayF32Le`] / [`PbmPixelFormat::RgbF32Le`] contract),
 //! independent of the on-disk byte order, so decode/encode only ever
 //! byte-swaps when the on-disk order is big-endian.
 
 use crate::error::{PbmError as Error, Result};
 use crate::header::{parse_header, Header, Magic, PfmInfo};
-use crate::image::{PbmImage, PbmPixelFormat, PbmPlane};
+use crate::image::{PbmImage, PbmPixelFormat, Plane as PbmPlane};
 
 /// Byte order + scale recovered from a decoded Portable FloatMap header.
 ///
@@ -62,12 +62,8 @@ pub fn decode_pfm(input: &[u8]) -> Result<(PbmImage, PfmHeaderInfo)> {
 /// Advance a cursor by the returned count to reach the next image's magic:
 ///
 /// ```
-/// # use oxideav_pbm::{decode_pfm_consumed, encode_pfm, PbmImage, PbmPixelFormat, PbmPlane};
-/// # let img = PbmImage {
-/// #     width: 1, height: 1, pixel_format: PbmPixelFormat::GrayF32,
-/// #     planes: vec![PbmPlane { stride: 4, data: 1.0f32.to_le_bytes().to_vec() }],
-/// #     pts: None,
-/// # };
+/// # use oxideav_pbm::{decode_pfm_consumed, encode_pfm, PbmImage, PbmPixelFormat};
+/// # let img = PbmImage::packed(1, 1, PbmPixelFormat::GrayF32Le, 4, 1.0f32.to_le_bytes().to_vec()).unwrap();
 /// let mut stream = encode_pfm(&img, true, 1.0).unwrap();
 /// stream.extend(encode_pfm(&img, false, 2.0).unwrap());
 /// let mut off = 0;
@@ -134,12 +130,8 @@ pub fn decode_pfm_consumed(input: &[u8]) -> Result<(PbmImage, PfmHeaderInfo, usi
 /// whitespace-only input is reported as a malformed stream.
 ///
 /// ```
-/// # use oxideav_pbm::{decode_pfm_multi, encode_pfm, PbmImage, PbmPixelFormat, PbmPlane};
-/// # let img = PbmImage {
-/// #     width: 1, height: 1, pixel_format: PbmPixelFormat::GrayF32,
-/// #     planes: vec![PbmPlane { stride: 4, data: 1.0f32.to_le_bytes().to_vec() }],
-/// #     pts: None,
-/// # };
+/// # use oxideav_pbm::{decode_pfm_multi, encode_pfm, PbmImage, PbmPixelFormat};
+/// # let img = PbmImage::packed(1, 1, PbmPixelFormat::GrayF32Le, 4, 1.0f32.to_le_bytes().to_vec()).unwrap();
 /// let mut stream = encode_pfm(&img, true, 1.0).unwrap();
 /// stream.extend(encode_pfm(&img, false, 2.0).unwrap());
 /// let images = decode_pfm_multi(&stream).unwrap();
@@ -210,9 +202,9 @@ pub(crate) fn decode_pfm_image(h: &Header, body: &[u8]) -> Result<(PbmImage, Pbm
     }
 
     let format = if ch == 3 {
-        PbmPixelFormat::RgbF32
+        PbmPixelFormat::RgbF32Le
     } else {
-        PbmPixelFormat::GrayF32
+        PbmPixelFormat::GrayF32Le
     };
     let stride = row_bytes;
     let mut data = vec![0u8; need];
@@ -234,13 +226,7 @@ pub(crate) fn decode_pfm_image(h: &Header, body: &[u8]) -> Result<(PbmImage, Pbm
     }
 
     Ok((
-        PbmImage {
-            width: h.width,
-            height: h.height,
-            pixel_format: format,
-            planes: vec![PbmPlane { stride, data }],
-            pts: None,
-        },
+        crate::decoder::build_image(h, format, PbmPlane { stride, data }),
         format,
     ))
 }
@@ -268,8 +254,8 @@ pub fn decode_pfm_scaled(input: &[u8]) -> Result<(PbmImage, PfmHeaderInfo)> {
     Ok((image, info))
 }
 
-/// Multiply every IEEE-754 float sample of a [`PbmPixelFormat::GrayF32`]
-/// or [`PbmPixelFormat::RgbF32`] image by `scale`, in place.
+/// Multiply every IEEE-754 float sample of a [`PbmPixelFormat::GrayF32Le`]
+/// or [`PbmPixelFormat::RgbF32Le`] image by `scale`, in place.
 ///
 /// This is the documented PFM scale-factor application: the Debevec
 /// reference says the magnitude of the header's third line is "a scale
@@ -284,8 +270,8 @@ pub fn decode_pfm_scaled(input: &[u8]) -> Result<(PbmImage, PfmHeaderInfo)> {
 /// raster); a non-float pixel format is rejected. A `scale` of exactly
 /// `1.0` is a no-op fast path.
 pub fn apply_pfm_scale(image: &mut PbmImage, scale: f32) -> Result<()> {
-    match image.pixel_format {
-        PbmPixelFormat::GrayF32 | PbmPixelFormat::RgbF32 => {}
+    match image.format {
+        PbmPixelFormat::GrayF32Le | PbmPixelFormat::RgbF32Le => {}
         other => {
             return Err(Error::unsupported(format!(
                 "PFM scale: pixel format {other:?} is not a float map"
@@ -307,8 +293,8 @@ pub fn apply_pfm_scale(image: &mut PbmImage, scale: f32) -> Result<()> {
     Ok(())
 }
 
-/// Divide every IEEE-754 float sample of a [`PbmPixelFormat::GrayF32`]
-/// or [`PbmPixelFormat::RgbF32`] image by `scale`, in place — the inverse
+/// Divide every IEEE-754 float sample of a [`PbmPixelFormat::GrayF32Le`]
+/// or [`PbmPixelFormat::RgbF32Le`] image by `scale`, in place — the inverse
 /// of [`apply_pfm_scale`].
 ///
 /// This is the encode-side companion to the documented PFM scale factor.
@@ -326,8 +312,8 @@ pub fn apply_pfm_scale(image: &mut PbmImage, scale: f32) -> Result<()> {
 /// zero would poison the raster), matching what [`encode_pfm`] will write.
 /// A `scale` of exactly `1.0` is a no-op fast path.
 pub fn apply_inverse_pfm_scale(image: &mut PbmImage, scale: f32) -> Result<()> {
-    match image.pixel_format {
-        PbmPixelFormat::GrayF32 | PbmPixelFormat::RgbF32 => {}
+    match image.format {
+        PbmPixelFormat::GrayF32Le | PbmPixelFormat::RgbF32Le => {}
         other => {
             return Err(Error::unsupported(format!(
                 "PFM inverse scale: pixel format {other:?} is not a float map"
@@ -370,8 +356,8 @@ pub fn apply_inverse_pfm_scale(image: &mut PbmImage, scale: f32) -> Result<()> {
 /// the sign of the scale line exactly as in [`encode_pfm`]; `scale` must
 /// be finite and non-zero.
 pub fn encode_pfm_scaled(image: &PbmImage, little_endian: bool, scale: f32) -> Result<Vec<u8>> {
-    match image.pixel_format {
-        PbmPixelFormat::GrayF32 | PbmPixelFormat::RgbF32 => {}
+    match image.format {
+        PbmPixelFormat::GrayF32Le | PbmPixelFormat::RgbF32Le => {}
         other => {
             return Err(Error::unsupported(format!(
                 "PFM encoder: pixel format {other:?} is not a float map"
@@ -394,7 +380,7 @@ pub fn encode_pfm_scaled(image: &PbmImage, little_endian: bool, scale: f32) -> R
 }
 
 /// Encode a [`PbmImage`] (whose pixel format must be
-/// [`PbmPixelFormat::GrayF32`] or [`PbmPixelFormat::RgbF32`]) as a
+/// [`PbmPixelFormat::GrayF32Le`] or [`PbmPixelFormat::RgbF32Le`]) as a
 /// Portable FloatMap. `little_endian` selects the on-disk byte order
 /// (and therefore the sign of the scale line); `scale` is the
 /// application-defined scale factor magnitude written on the third
@@ -405,7 +391,7 @@ pub fn encode_pfm(image: &PbmImage, little_endian: bool, scale: f32) -> Result<V
     }
     encode_pfm_plane(
         &image.planes[0],
-        image.pixel_format,
+        image.format,
         image.width,
         image.height,
         little_endian,
@@ -424,8 +410,8 @@ pub fn encode_pfm_plane(
     scale: f32,
 ) -> Result<Vec<u8>> {
     let ch = match format {
-        PbmPixelFormat::GrayF32 => 1usize,
-        PbmPixelFormat::RgbF32 => 3usize,
+        PbmPixelFormat::GrayF32Le => 1usize,
+        PbmPixelFormat::RgbF32Le => 3usize,
         other => {
             return Err(Error::unsupported(format!(
                 "PFM encoder: pixel format {other:?} is not a float map"
@@ -527,13 +513,13 @@ fn format_scale(v: f32) -> String {
 mod tests {
     use super::*;
 
-    /// Build a GrayF32 / RgbF32 image whose samples encode their (row,
+    /// Build a GrayF32Le / RgbF32Le image whose samples encode their (row,
     /// col, channel) coordinates so a vertical flip is observable.
     fn float_image(w: u32, h: u32, ch: usize) -> PbmImage {
         let format = if ch == 3 {
-            PbmPixelFormat::RgbF32
+            PbmPixelFormat::RgbF32Le
         } else {
-            PbmPixelFormat::GrayF32
+            PbmPixelFormat::GrayF32Le
         };
         let stride = w as usize * ch * 4;
         let mut data = vec![0u8; stride * h as usize];
@@ -546,13 +532,7 @@ mod tests {
                 }
             }
         }
-        PbmImage {
-            width: w,
-            height: h,
-            pixel_format: format,
-            planes: vec![PbmPlane { stride, data }],
-            pts: None,
-        }
+        PbmImage::packed(w, h, format, stride, data).unwrap()
     }
 
     #[test]
@@ -584,7 +564,7 @@ mod tests {
         assert!(bytes.starts_with(b"PF\n4 3\n-1.0\n"));
         let (back, info) = decode_pfm(&bytes).unwrap();
         assert_eq!(info.channels, 3);
-        assert_eq!(back.pixel_format, PbmPixelFormat::RgbF32);
+        assert_eq!(back.format, PbmPixelFormat::RgbF32Le);
         assert_eq!(back.planes[0].data, img.planes[0].data);
     }
 
@@ -614,13 +594,7 @@ mod tests {
         let mut data = vec![0u8; 2 * 4];
         data[0..4].copy_from_slice(&11.0f32.to_le_bytes());
         data[4..8].copy_from_slice(&22.0f32.to_le_bytes());
-        let img = PbmImage {
-            width: 1,
-            height: 2,
-            pixel_format: PbmPixelFormat::GrayF32,
-            planes: vec![PbmPlane { stride: 4, data }],
-            pts: None,
-        };
+        let img = PbmImage::packed(1, 2, PbmPixelFormat::GrayF32Le, 4, data).unwrap();
         let bytes = encode_pfm(&img, true, 1.0).unwrap();
         let body = &bytes[bytes.len() - 8..];
         // First on-disk sample is the bottom row = 22.0.
@@ -638,13 +612,7 @@ mod tests {
     fn big_endian_disk_bytes_are_swapped() {
         let mut data = vec![0u8; 4];
         data.copy_from_slice(&1.0f32.to_le_bytes()); // LE: 00 00 80 3F
-        let img = PbmImage {
-            width: 1,
-            height: 1,
-            pixel_format: PbmPixelFormat::GrayF32,
-            planes: vec![PbmPlane { stride: 4, data }],
-            pts: None,
-        };
+        let img = PbmImage::packed(1, 1, PbmPixelFormat::GrayF32Le, 4, data).unwrap();
         let bytes = encode_pfm(&img, false, 1.0).unwrap();
         // On disk, big-endian 1.0 = 3F 80 00 00.
         assert_eq!(&bytes[bytes.len() - 4..], &[0x3F, 0x80, 0x00, 0x00]);
@@ -699,16 +667,7 @@ mod tests {
 
     #[test]
     fn apply_pfm_scale_rejects_non_float_and_non_finite() {
-        let mut gray8 = PbmImage {
-            width: 1,
-            height: 1,
-            pixel_format: PbmPixelFormat::Gray8,
-            planes: vec![PbmPlane {
-                stride: 1,
-                data: vec![0u8],
-            }],
-            pts: None,
-        };
+        let mut gray8 = PbmImage::packed(1, 1, PbmPixelFormat::Gray8, 1, vec![0u8]).unwrap();
         assert!(matches!(
             apply_pfm_scale(&mut gray8, 2.0),
             Err(Error::Unsupported(_))
@@ -743,16 +702,7 @@ mod tests {
 
     #[test]
     fn apply_inverse_pfm_scale_rejects_non_float_zero_and_non_finite() {
-        let mut gray8 = PbmImage {
-            width: 1,
-            height: 1,
-            pixel_format: PbmPixelFormat::Gray8,
-            planes: vec![PbmPlane {
-                stride: 1,
-                data: vec![0u8],
-            }],
-            pts: None,
-        };
+        let mut gray8 = PbmImage::packed(1, 1, PbmPixelFormat::Gray8, 1, vec![0u8]).unwrap();
         assert!(matches!(
             apply_inverse_pfm_scale(&mut gray8, 2.0),
             Err(Error::Unsupported(_))
@@ -832,16 +782,7 @@ mod tests {
 
     #[test]
     fn encode_pfm_scaled_rejects_non_float_and_bad_scale() {
-        let gray8 = PbmImage {
-            width: 1,
-            height: 1,
-            pixel_format: PbmPixelFormat::Gray8,
-            planes: vec![PbmPlane {
-                stride: 1,
-                data: vec![0u8],
-            }],
-            pts: None,
-        };
+        let gray8 = PbmImage::packed(1, 1, PbmPixelFormat::Gray8, 1, vec![0u8]).unwrap();
         assert!(matches!(
             encode_pfm_scaled(&gray8, true, 1.0),
             Err(Error::Unsupported(_))
@@ -924,7 +865,7 @@ mod tests {
         while off < stream.len() {
             let (image, info, consumed) = decode_pfm_consumed(&stream[off..]).unwrap();
             assert!(consumed > 0);
-            seen.push((info, image.width, image.height, image.pixel_format));
+            seen.push((info, image.width, image.height, image.format));
             off += consumed;
         }
         assert_eq!(off, stream.len());
@@ -935,14 +876,14 @@ mod tests {
         assert_eq!(info0.scale, 1.0);
         assert_eq!(info0.channels, 1);
         assert_eq!((w0, h0), (4, 3));
-        assert_eq!(fmt0, PbmPixelFormat::GrayF32);
+        assert_eq!(fmt0, PbmPixelFormat::GrayF32Le);
 
         let (info1, w1, h1, fmt1) = seen[1];
         assert!(!info1.little_endian);
         assert_eq!(info1.scale, 2.5);
         assert_eq!(info1.channels, 3);
         assert_eq!((w1, h1), (2, 2));
-        assert_eq!(fmt1, PbmPixelFormat::RgbF32);
+        assert_eq!(fmt1, PbmPixelFormat::RgbF32Le);
     }
 
     #[test]
@@ -962,14 +903,14 @@ mod tests {
         assert_eq!(info0.scale, 1.0);
         assert_eq!(info0.channels, 1);
         assert_eq!((img0.width, img0.height), (4, 3));
-        assert_eq!(img0.pixel_format, PbmPixelFormat::GrayF32);
+        assert_eq!(img0.format, PbmPixelFormat::GrayF32Le);
 
         let (img1, info1) = &images[1];
         assert!(!info1.little_endian);
         assert_eq!(info1.scale, 2.5);
         assert_eq!(info1.channels, 3);
         assert_eq!((img1.width, img1.height), (2, 2));
-        assert_eq!(img1.pixel_format, PbmPixelFormat::RgbF32);
+        assert_eq!(img1.format, PbmPixelFormat::RgbF32Le);
     }
 
     #[test]

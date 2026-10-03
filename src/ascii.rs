@@ -28,6 +28,18 @@ pub fn decode_ascii(h: &Header, body: &[u8]) -> Result<DecodedSamples> {
 /// next concatenated image's magic; single-image [`decode_ascii`]
 /// discards it.
 pub fn decode_ascii_consumed(h: &Header, body: &[u8]) -> Result<(DecodedSamples, usize)> {
+    decode_ascii_consumed_opts(h, body, false)
+}
+
+/// [`decode_ascii_consumed`] with the [`crate::DecodeOptions::strict`]
+/// switch: a P2 / P3 sample above `MAXVAL` is clamped when `strict` is
+/// `false` (the long-standing lenient behaviour) and rejected with
+/// `InvalidData` when it is `true`.
+pub fn decode_ascii_consumed_opts(
+    h: &Header,
+    body: &[u8],
+    strict: bool,
+) -> Result<(DecodedSamples, usize)> {
     let w = h.width as usize;
     let hh = h.height as usize;
     let depth = h.depth as usize;
@@ -79,8 +91,13 @@ pub fn decode_ascii_consumed(h: &Header, body: &[u8]) -> Result<(DecodedSamples,
             for _ in 0..total_samples {
                 let v = next_uint(body, &mut cursor)?;
                 if v > mv {
-                    // Spec leaves over-maxval values unspecified; clamp
-                    // (matches every implementation we've seen).
+                    // The format leaves over-maxval values unspecified:
+                    // lenient mode clamps, strict mode rejects.
+                    if strict {
+                        return Err(Error::invalid(format!(
+                            "Netpbm ASCII: sample {v} exceeds maxval {mv}"
+                        )));
+                    }
                     out.push(mv as u16);
                 } else {
                     out.push(v as u16);

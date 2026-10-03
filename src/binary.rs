@@ -29,6 +29,14 @@ pub struct DecodedSamples {
 /// already parsed the [`Header`] and seeked `data` to start at the
 /// pixel array (i.e. `&input[header.data_offset..]`).
 pub fn decode_binary(h: &Header, data: &[u8]) -> Result<DecodedSamples> {
+    decode_binary_opts(h, data, false)
+}
+
+/// [`decode_binary`] with the [`crate::DecodeOptions::strict`] switch: a
+/// P5 / P6 / P7 sample above a non-natural `MAXVAL` is clamped when
+/// `strict` is `false` (the long-standing lenient behaviour) and rejected
+/// with `InvalidData` when it is `true`.
+pub fn decode_binary_opts(h: &Header, data: &[u8], strict: bool) -> Result<DecodedSamples> {
     let w = h.width as usize;
     let hh = h.height as usize;
     let depth = h.depth as usize;
@@ -102,6 +110,12 @@ pub fn decode_binary(h: &Header, data: &[u8]) -> Result<DecodedSamples> {
             if h.maxval < 65535 {
                 for s in out.iter_mut() {
                     if *s > mv {
+                        if strict {
+                            return Err(Error::invalid(format!(
+                                "Netpbm binary: sample {} exceeds maxval {mv}",
+                                *s
+                            )));
+                        }
                         *s = mv;
                     }
                 }

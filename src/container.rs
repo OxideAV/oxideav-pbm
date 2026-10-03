@@ -17,7 +17,7 @@ use oxideav_core::{
     ContainerRegistry, Demuxer, Muxer, ProbeData, ProbeScore, ReadSeek, WriteSeek, MAX_PROBE_SCORE,
 };
 
-use crate::header::{parse_header, probe_is_netpbm, Magic, Tupltype};
+use crate::header::{parse_header, probe_is_netpbm};
 
 pub fn register(reg: &mut ContainerRegistry) {
     reg.register_demuxer("pbm", open_demuxer);
@@ -65,10 +65,9 @@ pub fn open_demuxer(
     let mut params = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
     params.width = Some(header.width);
     params.height = Some(header.height);
-    // `None` for Portable FloatMap: its 32-bit float samples have no
-    // representation in the core `PixelFormat` catalogue. The decoder is
-    // self-describing from the byte stream, so the advertised format is
-    // advisory and may be left unset.
+    // Advertise the native layout the decoder will produce — every
+    // Netpbm / PFM layout now has a core counterpart. The decoder is
+    // self-describing from the byte stream, so this is advisory.
     params.pixel_format = pick_advertised_format(&header);
     let stream = StreamInfo {
         index: 0,
@@ -84,52 +83,9 @@ pub fn open_demuxer(
 }
 
 fn pick_advertised_format(h: &crate::header::Header) -> Option<PixelFormat> {
-    Some(match h.magic {
-        // Portable FloatMap float samples are outside the core catalogue.
-        Magic::PfPfmGrayFloat | Magic::PFPfmRgbFloat => return None,
-        Magic::P1AsciiBitmap | Magic::P4BinaryBitmap => PixelFormat::MonoBlack,
-        Magic::P2AsciiGraymap | Magic::P5BinaryGraymap => {
-            if h.maxval > 255 {
-                PixelFormat::Gray16Le
-            } else {
-                PixelFormat::Gray8
-            }
-        }
-        Magic::P3AsciiPixmap | Magic::P6BinaryPixmap => {
-            if h.maxval > 255 {
-                PixelFormat::Rgb48Le
-            } else {
-                PixelFormat::Rgb24
-            }
-        }
-        Magic::P7Pam => match (&h.tupltype, h.depth, h.maxval > 255) {
-            (Some(Tupltype::BlackAndWhite), _, _) => PixelFormat::MonoBlack,
-            (Some(Tupltype::Grayscale), _, false) => PixelFormat::Gray8,
-            (Some(Tupltype::Grayscale), _, true) => PixelFormat::Gray16Le,
-            (Some(Tupltype::Rgb), _, false) => PixelFormat::Rgb24,
-            (Some(Tupltype::Rgb), _, true) => PixelFormat::Rgb48Le,
-            (Some(Tupltype::GrayscaleAlpha), _, false) => PixelFormat::Ya8,
-            // 16-bit grayscale-with-alpha decodes as the crate-local
-            // `Ya16Le`, which has no core counterpart — advertise no
-            // pixel format (same as PFM; the decoder is self-describing).
-            (Some(Tupltype::GrayscaleAlpha), _, true) => return None,
-            (Some(Tupltype::BlackAndWhiteAlpha), _, _) => PixelFormat::Rgba,
-            (Some(Tupltype::RgbAlpha), _, false) => PixelFormat::Rgba,
-            (Some(Tupltype::RgbAlpha), _, true) => PixelFormat::Rgba64Le,
-            // None and Custom(_) — DEPTH drives the advertised format.
-            (None, 1, false) | (Some(Tupltype::Custom(_)), 1, false) => PixelFormat::Gray8,
-            (None, 1, true) | (Some(Tupltype::Custom(_)), 1, true) => PixelFormat::Gray16Le,
-            (None, 2, false) | (Some(Tupltype::Custom(_)), 2, false) => PixelFormat::Ya8,
-            // Depth-2 16-bit also routes to `Ya16Le` — no core
-            // counterpart, advertise no pixel format.
-            (None, 2, true) | (Some(Tupltype::Custom(_)), 2, true) => return None,
-            (None, 3, false) | (Some(Tupltype::Custom(_)), 3, false) => PixelFormat::Rgb24,
-            (None, 3, true) | (Some(Tupltype::Custom(_)), 3, true) => PixelFormat::Rgb48Le,
-            (None, 4, false) | (Some(Tupltype::Custom(_)), 4, false) => PixelFormat::Rgba,
-            (None, 4, true) | (Some(Tupltype::Custom(_)), 4, true) => PixelFormat::Rgba64Le,
-            _ => PixelFormat::Rgba,
-        },
-    })
+    crate::decoder::native_format(h)
+        .ok()
+        .map(crate::registry::to_core_pixel_format)
 }
 
 struct PbmDemuxer {

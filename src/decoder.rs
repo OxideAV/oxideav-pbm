@@ -15,25 +15,31 @@
 //! | P7 GRAYSCALE_ALPHA 16   | `Ya16Le`       |
 //! | P7 RGB_ALPHA 8          | `Rgba`         |
 //! | P7 RGB_ALPHA 16         | `Rgba64Le`     |
+//! | `Pf` / `PF`             | `GrayF32Le` / `RgbF32Le` |
 //!
 //! BLACKANDWHITE_ALPHA falls back to a 4-byte-per-pixel `Rgba`
 //! representation (the bit-valued first channel expands to a gray
 //! triplet) — the alpha channel is preserved either way.
 //!
-//! With the default `registry` feature on, the gated `PbmDecoder` trait
-//! impl wraps [`decode_pbm`] for the `oxideav_core::Decoder` surface.
+//! The contract entry points ([`crate::decode`], [`crate::decode_with`],
+//! [`crate::decode_all`], …) live in [`crate::api`] and are built on
+//! `decode_one`; the pre-contract `decode_pbm*` functions remain here
+//! as deprecated wrappers. With the default `registry` feature on, the
+//! gated `PbmDecoder` trait impl wraps the same functions for the
+//! `oxideav_core::Decoder` surface.
 
 use crate::error::{PbmError as Error, Result};
 
-use crate::ascii::decode_ascii_consumed;
-use crate::binary::{copy_p4_row_msb, decode_binary, swap_bytes_u16_row, DecodedSamples};
+use crate::ascii::decode_ascii_consumed_opts;
+use crate::binary::{copy_p4_row_msb, decode_binary_opts, swap_bytes_u16_row, DecodedSamples};
 use crate::header::{parse_header, Header, Magic, Tupltype};
-use crate::image::{PbmImage, PbmPixelFormat, PbmPlane};
+use crate::image::{ColorInfo, Metadata, PbmImage, PbmPixelFormat, Plane as PbmPlane};
+use crate::options::DecodeOptions;
 
 #[cfg(feature = "registry")]
 use oxideav_core::Decoder;
 #[cfg(feature = "registry")]
-use oxideav_core::{CodecId, CodecParameters, Frame, Packet, VideoFrame, VideoPlane};
+use oxideav_core::{CodecId, CodecParameters, Frame, Packet, VideoFrame};
 
 /// Factory registered with the codec registry. One packet per whole
 /// Netpbm file; one *or more* frames per packet — a single file may
@@ -67,13 +73,17 @@ impl Decoder for PbmDecoder {
         &self.codec_id
     }
     fn send_packet(&mut self, packet: &Packet) -> oxideav_core::Result<()> {
-        // Decode *every* image in the packet, not just the first. A
-        // Netpbm/PAM/PFM file may concatenate multiple self-describing
-        // images back-to-back; the standalone `decode_pbm_multi` walks
-        // them all, and the framework path must too — otherwise a
-        // multi-image stream silently loses every frame after the first.
-        for (image, _fmt) in decode_pbm_multi(&packet.data)? {
-            self.pending.push_back(image_to_video_frame(image));
+        // Decode *every* image in the packet, not just the first — the
+        // same walk the standalone `decode_all` performs, so the
+        // framework path never silently loses the frames after the
+        // first of a concatenated stream. The registry adapter is a thin
+        // wrapper over the standalone function (one implementation).
+        for frame in crate::api::decode_all_with(&packet.data, &DecodeOptions::default())? {
+            self.pending
+                .push_back(crate::registry::image_into_video_frame(
+                    frame.image,
+                    packet.pts,
+                ));
         }
         Ok(())
     }
@@ -95,68 +105,128 @@ impl Decoder for PbmDecoder {
     }
 }
 
-#[cfg(feature = "registry")]
-fn image_to_video_frame(image: PbmImage) -> VideoFrame {
-    VideoFrame {
-        pts: image.pts,
-        planes: image
-            .planes
-            .into_iter()
-            .map(|p| VideoPlane {
-                stride: p.stride,
-                data: p.data,
-            })
-            .collect(),
+/// Assemble the decoder's output image: the header's geometry, the
+/// picked layout, its single plane, the family's documented colour
+/// convention for that layout and empty metadata. Internal: the
+/// geometry is the decoder's own, so no re-validation.
+pub(crate) fn build_image(header: &Header, format: PbmPixelFormat, plane: PbmPlane) -> PbmImage {
+    PbmImage {
+        width: header.width,
+        height: header.height,
+        format,
+        planes: vec![plane],
+        color: ColorInfo::default_for(format),
+        metadata: Metadata::default(),
     }
 }
 
-/// Decode a complete Netpbm file (any of the seven magic numbers) into
-/// a [`PbmImage`] plus the [`PbmPixelFormat`] the image carries.
-///
-/// Only the *first* image in `input` is decoded; trailing bytes (e.g. a
-/// second concatenated image in a multi-image stream) are ignored. Use
-/// [`decode_pbm_multi`] to walk every image in a concatenated stream.
-pub fn decode_pbm(input: &[u8]) -> Result<(PbmImage, PbmPixelFormat)> {
-    decode_pbm_consumed(input).map(|(image, fmt, _consumed)| (image, fmt))
+/// Decoded plane size in bytes the native layout for `header` implies,
+/// without allocating anything — what [`DecodeOptions::max_bytes`] is
+/// checked against. `Err` only when the product overflows (a hostile
+/// header), which is itself reported as a limit violation upstream.
+pub(crate) fn native_plane_bytes(header: &Header) -> Result<u64> {
+    let format = pick_pixel_format(header)?;
+    let row = match format.bytes_per_pixel() {
+        Some(bpp) => u64::from(header.width) * bpp as u64,
+        None => u64::from(header.width).div_ceil(8),
+    };
+    row.checked_mul(u64::from(header.height))
+        .ok_or_else(|| Error::limit("Netpbm: plane size overflows u64"))
 }
 
-/// The Netpbm/PAM/PFM family permits a single file to carry a **sequence
-/// of concatenated images** — each a self-describing magic + header +
-/// body, packed back-to-back with optional whitespace between them
-/// (`pnm(5)` / `pam(5)` describe a file as holding "one or more" images;
-/// the Portable FloatMap reference likewise places the next header
-/// immediately after the prior raster). Decode every image in `input`,
-/// returning one `(PbmImage, PbmPixelFormat)` per image in stream order.
+/// The native layout `decode` would return for a parsed header — the
+/// `format` field of [`crate::ImageInfo`].
+pub(crate) fn native_format(header: &Header) -> Result<PbmPixelFormat> {
+    pick_pixel_format(header)
+}
+
+/// Decode the first image in `input` under `opts`, returning the image,
+/// its fully parsed [`Header`] and the exact on-disk byte count (header +
+/// body, excluding any trailing inter-image whitespace). The one
+/// implementation every contract entry point and every deprecated
+/// wrapper is built on.
 ///
-/// A single image is the common case and yields a one-element `Vec`.
-/// Bytes are consumed exactly: each image's on-disk length is the header
-/// length plus the body length (deterministic for the binary and PFM
-/// magics from the dimensions; for the ASCII magics it is the offset of
-/// the byte after the final sample token). Inter-image ASCII whitespace
-/// is skipped before the next magic is read — the magic must be the
-/// first two bytes of each image, so a `#` between images is *not* a
-/// valid separator. Trailing whitespace after the last image is not an
-/// error; trailing *non-whitespace* that does not begin a valid header
-/// is reported as a malformed stream.
-pub fn decode_pbm_multi(input: &[u8]) -> Result<Vec<(PbmImage, PbmPixelFormat)>> {
+/// Order of operations: `parse_header` → [`DecodeOptions`] limits against
+/// the header's geometry (no allocation yet) → body decode. The byte
+/// count lets [`crate::decode_all`] locate the next concatenated image.
+pub(crate) fn decode_one(input: &[u8], opts: &DecodeOptions) -> Result<(PbmImage, Header, usize)> {
+    let header = parse_header(input)?;
+    let bytes = native_plane_bytes(&header)?;
+    opts.check(header.width, header.height, bytes)?;
+    let body = &input[header.data_offset..];
+    // Portable FloatMap has a wholly different (float, bottom-to-top,
+    // endianness-tagged) body — hand it to the dedicated decoder.
+    if header.magic.is_pfm() {
+        let (image, _fmt) = crate::pfm::decode_pfm_image(&header, body)?;
+        let body_len = pfm_body_byte_len(&header)?;
+        let consumed = header.data_offset + body_len;
+        return Ok((image, header, consumed));
+    }
+    // P4 → `MonoBlack` fast path. The wire format (MSB-first packed
+    // bits, rows padded to a byte boundary, `1 = black`) is byte-for-byte
+    // identical to the crate's `MonoBlack` plane convention, so the body
+    // is a per-row memcpy + trailing-bit mask — skipping both the
+    // intermediate `Vec<u16>` sample buffer that `decode_binary` would
+    // allocate and the per-bit re-pack pass that `samples_to_plane`
+    // would run. P1 (ASCII bitmap) and P7 `BLACKANDWHITE` (which inverts
+    // the bit sense per `pam(5)`) still go through the generic path.
+    if matches!(header.magic, Magic::P4BinaryBitmap) {
+        let (image, _fmt) = decode_p4_monoblack(&header, body)?;
+        let body_len = binary_body_byte_len(&header)?;
+        let consumed = header.data_offset + body_len;
+        return Ok((image, header, consumed));
+    }
+    // Binary 8-bit (maxval=255) and 16-bit (maxval=65535) hot path. When
+    // the wire sample layout matches the plane byte layout — P5 / P6 /
+    // P7 (`GRAYSCALE` / `GRAYSCALE_ALPHA` / `RGB` / `RGB_ALPHA`, plus
+    // custom-tupltype routed through depth) at the natural maxval — the
+    // body is either a per-row `copy_from_slice` (8-bit) or a per-row
+    // `swap_bytes_u16_row` (16-bit) straight into the destination plane.
+    if let Some((image, _fmt)) = try_decode_binary_bytewise(&header, body)? {
+        let body_len = binary_body_byte_len(&header)?;
+        let consumed = header.data_offset + body_len;
+        return Ok((image, header, consumed));
+    }
+    // ASCII bodies have no closed-form byte length (whitespace and
+    // comment runs vary), so the tokenizer reports its consumed cursor;
+    // binary bodies are deterministic from the dimensions.
+    let (samples, body_len) = if header.magic.is_ascii() {
+        decode_ascii_consumed_opts(&header, body, opts.strict)?
+    } else {
+        let samples = decode_binary_opts(&header, body, opts.strict)?;
+        (samples, binary_body_byte_len(&header)?)
+    };
+    let (plane, format) = samples_to_plane(&header, &samples)?;
+    let consumed = header.data_offset + body_len;
+    Ok((build_image(&header, format, plane), header, consumed))
+}
+
+#[inline]
+pub(crate) fn is_ascii_ws(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\r' | b'\n' | 0x0B | 0x0C)
+}
+
+/// Walk every image in a concatenated stream under `opts`, returning
+/// `(image, header)` pairs in stream order. Shared engine of
+/// [`crate::decode_all_with`] and the deprecated multi-image wrappers.
+///
+/// Inter-image ASCII whitespace is skipped before the next magic is
+/// read — the magic must be the first two bytes of each image, so a `#`
+/// between images is *not* a valid separator. Trailing whitespace after
+/// the last image is not an error; trailing *non-whitespace* that does
+/// not begin a valid header is reported as a malformed stream.
+pub(crate) fn decode_stream(input: &[u8], opts: &DecodeOptions) -> Result<Vec<(PbmImage, Header)>> {
     let mut images = Vec::new();
     let mut offset = 0usize;
     loop {
-        // Skip inter-image whitespace. The magic number must be the
-        // first two bytes of each image (the PNM/PAM grammar puts the
-        // magic before any comment), so only ASCII whitespace — not a
-        // `#` comment — may separate concatenated images. A `#` here
-        // therefore falls through to `parse_header`, which rejects it
-        // as a missing magic, surfacing a malformed stream rather than
-        // silently swallowing bytes.
         while offset < input.len() && is_ascii_ws(input[offset]) {
             offset += 1;
         }
         if offset >= input.len() {
             break;
         }
-        let (image, fmt, consumed) = decode_pbm_consumed(&input[offset..])?;
-        images.push((image, fmt));
+        let (image, header, consumed) = decode_one(&input[offset..], opts)?;
+        images.push((image, header));
         debug_assert!(consumed > 0, "decode consumed zero bytes — would loop");
         if consumed == 0 {
             // Defence-in-depth: never spin forever on a degenerate header.
@@ -170,148 +240,81 @@ pub fn decode_pbm_multi(input: &[u8]) -> Result<Vec<(PbmImage, PbmPixelFormat)>>
     Ok(images)
 }
 
-/// Walk every image in a concatenated stream like [`decode_pbm_multi`],
-/// but keep each image's fully parsed [`Header`] — one
-/// `(PbmImage, PbmPixelFormat, Header)` per image in stream order.
+// ---------------------------------------------------------------------------
+// Deprecated pre-contract entry points (one release)
+// ---------------------------------------------------------------------------
+
+/// Decode a complete Netpbm file (any of the nine magics) into a
+/// [`PbmImage`] plus the [`PbmPixelFormat`] the image carries.
 ///
-/// The metadata-carrying counterpart to [`decode_pbm_multi`]: a caller
-/// driving a mixed-magic stream gets the per-image `MAXVAL`, `DEPTH`, PAM
-/// `TUPLTYPE`, and — for the `Pf` / `PF` magics — the byte order and scale
-/// (via [`Header::pfm`]) without re-parsing any header. The returned
-/// header's `data_offset` is relative to the start of that image, not to
-/// the stream.
+/// Deprecated: the format is on the image ([`PbmImage::format`]); use
+/// [`crate::decode`].
+#[deprecated(note = "use oxideav_pbm::decode (IMAGE_CRATE_API)")]
+pub fn decode_pbm(input: &[u8]) -> Result<(PbmImage, PbmPixelFormat)> {
+    let (image, _header, _consumed) = decode_one(input, &DecodeOptions::default())?;
+    let fmt = image.format;
+    Ok((image, fmt))
+}
+
+/// Decode every image in a concatenated stream, returning one
+/// `(PbmImage, PbmPixelFormat)` per image in stream order.
+///
+/// Deprecated: use [`crate::decode_all`].
+#[deprecated(note = "use oxideav_pbm::decode_all (IMAGE_CRATE_API)")]
+pub fn decode_pbm_multi(input: &[u8]) -> Result<Vec<(PbmImage, PbmPixelFormat)>> {
+    Ok(decode_stream(input, &DecodeOptions::default())?
+        .into_iter()
+        .map(|(image, _h)| {
+            let fmt = image.format;
+            (image, fmt)
+        })
+        .collect())
+}
+
+/// Walk every image in a concatenated stream, keeping each image's
+/// fully parsed [`Header`].
+///
+/// Deprecated: use [`crate::decode_all`] — each [`crate::Frame`] carries
+/// its `header`.
+#[deprecated(note = "use oxideav_pbm::decode_all (Frame::header) (IMAGE_CRATE_API)")]
 pub fn decode_pbm_multi_with_headers(
     input: &[u8],
 ) -> Result<Vec<(PbmImage, PbmPixelFormat, Header)>> {
-    let mut images = Vec::new();
-    let mut offset = 0usize;
-    loop {
-        // Same inter-image whitespace skip as `decode_pbm_multi`: the
-        // magic must be the first two bytes of each image, so a `#` here
-        // is not a valid separator and falls through to `parse_header`,
-        // which reports the malformed stream.
-        while offset < input.len() && is_ascii_ws(input[offset]) {
-            offset += 1;
-        }
-        if offset >= input.len() {
-            break;
-        }
-        let (image, fmt, header, consumed) = decode_pbm_header_consumed(&input[offset..])?;
-        images.push((image, fmt, header));
-        debug_assert!(consumed > 0, "decode consumed zero bytes — would loop");
-        if consumed == 0 {
-            return Err(Error::invalid("Netpbm: image consumed zero bytes"));
-        }
-        offset += consumed;
-    }
-    if images.is_empty() {
-        return Err(Error::invalid("Netpbm: no images in stream"));
-    }
-    Ok(images)
-}
-
-#[inline]
-fn is_ascii_ws(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\r' | b'\n' | 0x0B | 0x0C)
+    Ok(decode_stream(input, &DecodeOptions::default())?
+        .into_iter()
+        .map(|(image, h)| {
+            let fmt = image.format;
+            (image, fmt, h)
+        })
+        .collect())
 }
 
 /// Decode the first image in `input` and report how many bytes of
 /// `input` it occupied (header + body, excluding any trailing inter-image
-/// whitespace). The byte count lets [`decode_pbm_multi`] locate the next
-/// concatenated image; single-image [`decode_pbm`] discards it.
+/// whitespace).
 ///
-/// This drops the parsed [`Header`]; use [`decode_pbm_header_consumed`]
-/// when a stream walker needs the per-image `MAXVAL` / `TUPLTYPE` / `DEPTH`
-/// metadata (the integer-format counterpart to the byte order + scale that
-/// [`crate::decode_pfm_consumed`] surfaces for PFM).
+/// Deprecated: use [`crate::decode_all`] to walk a stream, or
+/// [`crate::decode`] for the first image.
+#[deprecated(note = "use oxideav_pbm::decode / decode_all (IMAGE_CRATE_API)")]
 pub fn decode_pbm_consumed(input: &[u8]) -> Result<(PbmImage, PbmPixelFormat, usize)> {
-    decode_pbm_header_consumed(input).map(|(image, fmt, _header, consumed)| (image, fmt, consumed))
+    let (image, _header, consumed) = decode_one(input, &DecodeOptions::default())?;
+    let fmt = image.format;
+    Ok((image, fmt, consumed))
 }
 
 /// Decode the first image in `input` and return the fully parsed
 /// [`Header`] alongside the image, its [`PbmPixelFormat`], and the exact
-/// on-disk byte count (header + body, excluding any trailing inter-image
-/// whitespace).
+/// on-disk byte count.
 ///
-/// This is the metadata-carrying counterpart to [`decode_pbm_consumed`]:
-/// where that entry discards the header once decoding is done, this one
-/// hands it back so a caller walking a concatenated stream can recover the
-/// per-image `MAXVAL`, `DEPTH`, and PAM `TUPLTYPE` (and the `data_offset`
-/// of the body within `input`). It mirrors what
-/// [`crate::decode_pfm_consumed`] already does for the Portable FloatMap
-/// magics via [`crate::PfmHeaderInfo`] — for PFM inputs the returned
-/// header's [`Header::pfm`] field carries the byte order and scale.
-/// [`decode_pbm_multi_with_headers`] builds on this to walk an entire
-/// stream while keeping every image's header.
+/// Deprecated: use [`crate::decode_all`] (`Frame::header`) or
+/// [`crate::info`] (`ImageInfo::header`).
+#[deprecated(note = "use oxideav_pbm::decode_all / info (IMAGE_CRATE_API)")]
 pub fn decode_pbm_header_consumed(
     input: &[u8],
 ) -> Result<(PbmImage, PbmPixelFormat, Header, usize)> {
-    let header = parse_header(input)?;
-    let body = &input[header.data_offset..];
-    // Portable FloatMap has a wholly different (float, bottom-to-top,
-    // endianness-tagged) body — hand it to the dedicated decoder.
-    if header.magic.is_pfm() {
-        let (image, fmt) = crate::pfm::decode_pfm_image(&header, body)?;
-        let body_len = pfm_body_byte_len(&header)?;
-        let consumed = header.data_offset + body_len;
-        return Ok((image, fmt, header, consumed));
-    }
-    // P4 → `MonoBlack` fast path. The wire format (MSB-first packed
-    // bits, rows padded to a byte boundary, `1 = black`) is byte-for-byte
-    // identical to the crate's `MonoBlack` plane convention, so the body
-    // is a per-row memcpy + trailing-bit mask — skipping both the
-    // intermediate `Vec<u16>` sample buffer that `decode_binary` would
-    // allocate and the per-bit re-pack pass that `samples_to_plane`
-    // would run. Symmetric with the round-229 `encode_p4` rewrite,
-    // which dropped the same two scalar bit loops on the encode side.
-    // P1 (ASCII bitmap) and P7 `BLACKANDWHITE` (which inverts the bit
-    // sense per `pam(5)`) still go through the generic path.
-    if matches!(header.magic, Magic::P4BinaryBitmap) {
-        let (image, fmt) = decode_p4_monoblack(&header, body)?;
-        let body_len = binary_body_byte_len(&header)?;
-        let consumed = header.data_offset + body_len;
-        return Ok((image, fmt, header, consumed));
-    }
-    // Binary 8-bit (maxval=255) and 16-bit (maxval=65535) hot path. When
-    // the wire sample layout matches the plane byte layout — P5 / P6 /
-    // P7 (`GRAYSCALE` / `GRAYSCALE_ALPHA` / `RGB` / `RGB_ALPHA`, plus
-    // custom-tupltype routed through depth) at the natural maxval — the
-    // body is either a per-row `copy_from_slice` (8-bit) or a per-row
-    // `swap_bytes_u16_row` (16-bit) straight into the destination plane.
-    // This skips both the intermediate `Vec<u16>` widen pass in
-    // `decode_binary` and the per-sample `scale_to_*` /
-    // `to_le_bytes` loop in `samples_to_plane`. Symmetric with the
-    // round-229 `encode_p4` and round-248 `decode_p4_monoblack`
-    // memcpy rewrites.
-    if let Some((image, fmt)) = try_decode_binary_bytewise(&header, body)? {
-        let body_len = binary_body_byte_len(&header)?;
-        let consumed = header.data_offset + body_len;
-        return Ok((image, fmt, header, consumed));
-    }
-    // ASCII bodies have no closed-form byte length (whitespace and
-    // comment runs vary), so the tokenizer reports its consumed cursor;
-    // binary bodies are deterministic from the dimensions.
-    let (samples, body_len) = if header.magic.is_ascii() {
-        let (samples, cursor) = decode_ascii_consumed(&header, body)?;
-        (samples, cursor)
-    } else {
-        let samples = decode_binary(&header, body)?;
-        (samples, binary_body_byte_len(&header)?)
-    };
-    let (plane, format) = samples_to_plane(&header, &samples)?;
-    let consumed = header.data_offset + body_len;
-    Ok((
-        PbmImage {
-            width: header.width,
-            height: header.height,
-            pixel_format: format,
-            planes: vec![plane],
-            pts: None,
-        },
-        format,
-        header,
-        consumed,
-    ))
+    let (image, header, consumed) = decode_one(input, &DecodeOptions::default())?;
+    let fmt = image.format;
+    Ok((image, fmt, header, consumed))
 }
 
 /// On-disk body byte length for the **binary** PNM/PAM magics
@@ -377,13 +380,7 @@ fn decode_p4_monoblack(header: &Header, body: &[u8]) -> Result<(PbmImage, PbmPix
         data,
     };
     Ok((
-        PbmImage {
-            width: header.width,
-            height: header.height,
-            pixel_format: PbmPixelFormat::MonoBlack,
-            planes: vec![plane],
-            pts: None,
-        },
+        build_image(header, PbmPixelFormat::MonoBlack, plane),
         PbmPixelFormat::MonoBlack,
     ))
 }
@@ -492,13 +489,7 @@ fn try_decode_binary_bytewise(
         }
     }
     Ok(Some((
-        PbmImage {
-            width: header.width,
-            height: header.height,
-            pixel_format: format,
-            planes: vec![PbmPlane { stride, data }],
-            pts: None,
-        },
+        build_image(header, format, PbmPlane { stride, data }),
         format,
     )))
 }
@@ -523,7 +514,7 @@ fn samples_to_plane(h: &Header, s: &DecodedSamples) -> Result<(PbmPlane, PbmPixe
     // against a downstream multiplication overflow if either layer
     // returned a `DecodedSamples` larger than `usize::MAX / 8`.
     let bytes_per_pixel: usize = match format {
-        PbmPixelFormat::MonoBlack => 1, // computed as div_ceil below
+        PbmPixelFormat::MonoBlack | PbmPixelFormat::MonoWhite => 1, // computed as div_ceil below
         PbmPixelFormat::Gray8 => 1,
         PbmPixelFormat::Ya8 => 2,
         PbmPixelFormat::Gray16Le => 2,
@@ -531,8 +522,8 @@ fn samples_to_plane(h: &Header, s: &DecodedSamples) -> Result<(PbmPlane, PbmPixe
         PbmPixelFormat::Rgba | PbmPixelFormat::Bgra | PbmPixelFormat::Ya16Le => 4,
         PbmPixelFormat::Rgb48Le => 6,
         PbmPixelFormat::Rgba64Le => 8,
-        PbmPixelFormat::GrayF32 => 4,
-        PbmPixelFormat::RgbF32 => 12,
+        PbmPixelFormat::GrayF32Le => 4,
+        PbmPixelFormat::RgbF32Le => 12,
     };
     let stride_check = if matches!(format, PbmPixelFormat::MonoBlack) {
         w.div_ceil(8)
@@ -659,14 +650,15 @@ fn samples_to_plane(h: &Header, s: &DecodedSamples) -> Result<(PbmPlane, PbmPixe
             }
             Ok((PbmPlane { stride, data }, format))
         }
-        // `Bgra` is encode-side input only — never picked by the decoder.
-        PbmPixelFormat::Bgra => Err(Error::unsupported(
-            "Netpbm: BGRA decode not produced by any source format".to_string(),
+        // `Bgra` / `MonoWhite` are encode-side input only — never picked
+        // by the decoder.
+        PbmPixelFormat::Bgra | PbmPixelFormat::MonoWhite => Err(Error::unsupported(
+            "Netpbm: BGRA / MonoWhite decode not produced by any source format".to_string(),
         )),
         // The float maps are decoded by `crate::pfm::decode_pfm_image`,
         // which `decode_pbm` dispatches to before reaching this integer
         // sample path — they never arrive here.
-        PbmPixelFormat::GrayF32 | PbmPixelFormat::RgbF32 => Err(Error::invalid(
+        PbmPixelFormat::GrayF32Le | PbmPixelFormat::RgbF32Le => Err(Error::invalid(
             "Netpbm: float-map pixel format reached the integer sample path",
         )),
     }
@@ -741,8 +733,8 @@ fn fill_rgba_u8(dst: &mut [u8], src: &[u16], maxval: u32, layout: RgbaLayout) {
 /// drive the choice when present; otherwise we go by `(depth, bits)`.
 fn pick_pixel_format(h: &Header) -> Result<PbmPixelFormat> {
     Ok(match h.magic {
-        Magic::PfPfmGrayFloat => PbmPixelFormat::GrayF32,
-        Magic::PFPfmRgbFloat => PbmPixelFormat::RgbF32,
+        Magic::PfPfmGrayFloat => PbmPixelFormat::GrayF32Le,
+        Magic::PFPfmRgbFloat => PbmPixelFormat::RgbF32Le,
         Magic::P1AsciiBitmap | Magic::P4BinaryBitmap => PbmPixelFormat::MonoBlack,
         Magic::P2AsciiGraymap | Magic::P5BinaryGraymap => {
             if h.maxval > 255 {
@@ -826,6 +818,7 @@ pub(crate) fn scale_to_u16(s: u16, maxval: u32) -> u16 {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 
@@ -1258,7 +1251,16 @@ mod tests {
         // overflows or vastly exceeds body.len(). Must fail without
         // the multi-GiB plane allocation.
         let buf = b"P5\n8 200888808\n65535\n\x00\x00\x00\x00";
+        // Default limits (1 GiB of decoded plane) fire first, from the
+        // header alone.
         let err = decode_pbm(buf).unwrap_err();
+        match err {
+            crate::error::PbmError::LimitExceeded(_) => {}
+            other => panic!("expected LimitExceeded, got {other:?}"),
+        }
+        // With the limits lifted the body-length check still refuses
+        // the allocation.
+        let err = decode_one(buf, &DecodeOptions::new().unlimited()).unwrap_err();
         match err {
             crate::error::PbmError::InvalidData(_) => {}
             other => panic!("expected InvalidData, got {other:?}"),

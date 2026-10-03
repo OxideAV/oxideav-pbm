@@ -1,51 +1,58 @@
 //! Netpbm encoder.
 //!
-//! Picks an output magic from the input [`PbmPixelFormat`]:
+//! The natural (default) output magic per input [`PbmPixelFormat`]:
 //!
-//! | PbmPixelFormat     | Output |
-//! |--------------------|--------|
-//! | `MonoBlack`        | P4     |
-//! | `Gray8`            | P5 (maxval 255) |
-//! | `Gray16Le`         | P5 (maxval 65535, big-endian samples on disk) |
-//! | `Rgb24`            | P6 (maxval 255) |
-//! | `Rgb48Le`          | P6 (maxval 65535) |
-//! | `Rgba` / `Bgra`    | P7 RGB_ALPHA (maxval 255) |
-//! | `Rgba64Le`         | P7 RGB_ALPHA (maxval 65535) |
-//! | `Ya8`              | P7 GRAYSCALE_ALPHA (maxval 255) |
-//! | `Ya16Le`           | P7 GRAYSCALE_ALPHA (maxval 65535) |
+//! | PbmPixelFormat          | Output |
+//! |-------------------------|--------|
+//! | `MonoBlack` / `MonoWhite` | P4 (bits inverted for `MonoWhite`) |
+//! | `Gray8`                 | P5 (maxval 255) |
+//! | `Gray16Le`              | P5 (maxval 65535, big-endian samples on disk) |
+//! | `Rgb24`                 | P6 (maxval 255) |
+//! | `Rgb48Le`               | P6 (maxval 65535) |
+//! | `Rgba` / `Bgra`         | P7 RGB_ALPHA (maxval 255) |
+//! | `Rgba64Le`              | P7 RGB_ALPHA (maxval 65535) |
+//! | `Ya8`                   | P7 GRAYSCALE_ALPHA (maxval 255) |
+//! | `Ya16Le`                | P7 GRAYSCALE_ALPHA (maxval 65535) |
+//! | `GrayF32Le` / `RgbF32Le` | Portable FloatMap `Pf` / `PF` (little-endian, scale 1) |
 //!
-//! Other pixel formats are rejected so the caller gets a clear error
-//! instead of a silent conversion. ASCII output (P1/P2/P3) can be
-//! requested via [`encode_pbm_ascii`] — the binary path is always
-//! preferred for size.
-//!
-//! Callers that need to pin the on-disk magic explicitly (regardless of
-//! the input [`PbmPixelFormat`]) use [`encode_pbm_with_format`] +
-//! [`PbmEncodeFormat`] — useful when the consumer cares whether they
-//! get the plain ASCII form (`P1`/`P2`/`P3`) or the binary form
-//! (`P4`/`P5`/`P6`/`P7`).
+//! [`crate::EncodeOptions`] selects the other flavours — plain-text
+//! P1 / P2 / P3 (`ascii`), the P7 PAM container for any integer layout
+//! (`pam` / `tupltype`), a non-natural `MAXVAL` (`maxval`, samples
+//! rescaled), and the PFM byte order / scale line. The contract entry
+//! points ([`crate::encode`], [`crate::encode_rgb8`], …) live in
+//! [`crate::api`] and call `encode_image`; the pre-contract
+//! `encode_pbm*` functions and [`PbmEncodeFormat`] remain here as
+//! deprecated wrappers over the same private writers.
 
 use crate::error::{PbmError as Error, Result};
 
 use crate::ascii::{encode_ascii_body, encode_ascii_body_bits, encode_ascii_body_u8};
 use crate::binary::{bgra_to_rgba_row, copy_p4_row_msb, swap_bytes_u16_row};
 use crate::header::Magic;
-use crate::image::{PbmImage, PbmPixelFormat, PbmPlane};
+use crate::image::{PbmImage, PbmPixelFormat, Plane as PbmPlane};
+use crate::options::EncodeOptions;
 
 #[cfg(feature = "registry")]
 use oxideav_core::Encoder;
 #[cfg(feature = "registry")]
 use oxideav_core::{CodecId, CodecParameters, Frame, Packet, TimeBase};
 
+/// Factory registered with the codec registry. `params.options` is
+/// parsed into [`EncodeOptions`] through the registry schema
+/// (`ascii`, `pam`, `maxval`, `tupltype`, `pfm_little_endian`,
+/// `pfm_scale`); an unknown key or malformed value is rejected here.
 #[cfg(feature = "registry")]
 pub fn make_encoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn Encoder>> {
     let mut out_params = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
     out_params.width = params.width;
     out_params.height = params.height;
     out_params.pixel_format = params.pixel_format;
+    let options: EncodeOptions = oxideav_core::parse_options(&params.options)?;
+    options.validate()?;
     Ok(Box::new(PbmEncoder {
         codec_id: CodecId::new(crate::CODEC_ID_STR),
         out_params,
+        options,
         pending: None,
         eof: false,
     }))
@@ -55,6 +62,7 @@ pub fn make_encoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn En
 struct PbmEncoder {
     codec_id: CodecId,
     out_params: CodecParameters,
+    options: EncodeOptions,
     pending: Option<Vec<u8>>,
     eof: bool,
 }
@@ -76,28 +84,10 @@ impl Encoder for PbmEncoder {
                 ))
             }
         };
-        let format = self.out_params.pixel_format.ok_or_else(|| {
-            oxideav_core::Error::invalid("PBM encoder: pixel_format missing in CodecParameters")
-        })?;
-        let width = self.out_params.width.ok_or_else(|| {
-            oxideav_core::Error::invalid("PBM encoder: width missing in CodecParameters")
-        })?;
-        let height = self.out_params.height.ok_or_else(|| {
-            oxideav_core::Error::invalid("PBM encoder: height missing in CodecParameters")
-        })?;
-        let pbm_format = crate::registry::pixel_format_to_pbm(format).ok_or_else(|| {
-            oxideav_core::Error::invalid(format!(
-                "PBM encoder: pixel format {format:?} not representable as Netpbm"
-            ))
-        })?;
-        if vf.planes.is_empty() {
-            return Err(oxideav_core::Error::invalid("PBM encoder: empty plane"));
-        }
-        let plane = PbmPlane {
-            stride: vf.planes[0].stride,
-            data: vf.planes[0].data.clone(),
-        };
-        let bytes = encode_pbm_plane(&plane, pbm_format, width, height)?;
+        // Thin adapter: rebuild the standalone image from the frame and
+        // run the one standalone encoder (`crate::encode`).
+        let image = PbmImage::from_video_frame(vf, &self.out_params)?;
+        let bytes = encode_image(&image, &self.options)?;
         self.pending = Some(bytes);
         Ok(())
     }
@@ -123,18 +113,315 @@ impl Encoder for PbmEncoder {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Contract encoder — the one implementation
+// ---------------------------------------------------------------------------
+
+/// Which body / container form the generic writer emits.
+#[derive(Clone, Copy)]
+enum Flavour<'a> {
+    /// Plain-text P1 / P2 / P3.
+    Ascii,
+    /// Raw P4 / P5 / P6.
+    Raw,
+    /// P7 PAM with this `TUPLTYPE` token.
+    Pam(&'a str),
+}
+
+/// The PAM `TUPLTYPE` the family defines for an integer layout.
+fn standard_tupltype(fmt: PbmPixelFormat) -> &'static str {
+    match fmt {
+        PbmPixelFormat::MonoBlack | PbmPixelFormat::MonoWhite => "BLACKANDWHITE",
+        PbmPixelFormat::Gray8 | PbmPixelFormat::Gray16Le => "GRAYSCALE",
+        PbmPixelFormat::Ya8 | PbmPixelFormat::Ya16Le => "GRAYSCALE_ALPHA",
+        PbmPixelFormat::Rgb24 | PbmPixelFormat::Rgb48Le => "RGB",
+        PbmPixelFormat::Rgba | PbmPixelFormat::Bgra | PbmPixelFormat::Rgba64Le => "RGB_ALPHA",
+        // Float layouts never reach the PAM writer.
+        PbmPixelFormat::GrayF32Le | PbmPixelFormat::RgbF32Le => "RGB",
+    }
+}
+
+/// Natural `MAXVAL` of an integer layout (1 for bilevel).
+fn natural_maxval(fmt: PbmPixelFormat) -> u32 {
+    match fmt.bits_per_channel() {
+        1 => 1,
+        8 => 255,
+        _ => 65535,
+    }
+}
+
+/// Invert a bilevel plane's bits (`MonoWhite` → the `MonoBlack` / P4
+/// wire sense), row by row, keeping the stride.
+fn invert_bilevel(plane: &PbmPlane, w: usize, h: usize) -> PbmPlane {
+    let row_bytes = w.div_ceil(8);
+    let mut data = vec![0u8; row_bytes * h];
+    for y in 0..h {
+        let src = &plane.data[y * plane.stride..y * plane.stride + row_bytes];
+        for (d, s) in data[y * row_bytes..(y + 1) * row_bytes].iter_mut().zip(src) {
+            *d = !*s;
+        }
+    }
+    PbmPlane {
+        stride: row_bytes,
+        data,
+    }
+}
+
+/// [`crate::encode`]: write `image` under `opts`. See the module docs
+/// for the natural magic per layout and [`EncodeOptions`] for the
+/// flavour knobs. Returns [`Error::Unsupported`] for combinations the
+/// family cannot represent (alpha or float in plain text, PAM options
+/// on a float layout, `ascii` + `pam`) and [`Error::InvalidData`] for an
+/// image whose public fields were mutated into an inconsistent state.
+pub(crate) fn encode_image(image: &PbmImage, opts: &EncodeOptions) -> Result<Vec<u8>> {
+    opts.validate()?;
+    image.validate()?;
+    let fmt = image.format;
+    let plane = &image.planes[0];
+    let w = image.width as usize;
+    let h = image.height as usize;
+
+    if fmt.is_float() {
+        if opts.ascii || opts.pam || opts.tupltype.is_some() || opts.maxval.is_some() {
+            return Err(Error::unsupported(
+                "Netpbm encoder: Portable FloatMap has no plain-text or PAM form and no MAXVAL",
+            ));
+        }
+        return crate::pfm::encode_pfm_plane(
+            plane,
+            fmt,
+            image.width,
+            image.height,
+            opts.pfm_little_endian,
+            opts.pfm_scale,
+        );
+    }
+
+    // Bilevel input is normalised to the wire sense (1 = black) first.
+    let inverted;
+    let plane = if fmt == PbmPixelFormat::MonoWhite {
+        inverted = invert_bilevel(plane, w, h);
+        &inverted
+    } else {
+        plane
+    };
+    let fmt = if fmt == PbmPixelFormat::MonoWhite {
+        PbmPixelFormat::MonoBlack
+    } else {
+        fmt
+    };
+
+    let natural = natural_maxval(fmt);
+    // Bilevel layouts have no MAXVAL knob (P1 / P4 carry none; PAM
+    // BLACKANDWHITE is always 1).
+    let maxval = if fmt.is_bilevel() {
+        natural
+    } else {
+        opts.maxval.unwrap_or(natural)
+    };
+    let is_natural = maxval == natural;
+
+    if opts.ascii {
+        if fmt.has_alpha() {
+            return Err(Error::unsupported(
+                "Netpbm encoder: the plain-text forms P1 / P2 / P3 cannot carry alpha; use the raw PAM form",
+            ));
+        }
+        if is_natural {
+            return Ok(match fmt {
+                PbmPixelFormat::MonoBlack => emit_ascii_pbm_header_and_body(plane, w, h),
+                PbmPixelFormat::Gray8 => emit_ascii_pgm_8(plane, w, h),
+                PbmPixelFormat::Gray16Le => emit_ascii_pgm_16(plane, w, h),
+                PbmPixelFormat::Rgb24 => emit_ascii_ppm_8(plane, w, h),
+                _ => emit_ascii_ppm_16(plane, w, h),
+            });
+        }
+        return encode_generic(plane, fmt, w, h, maxval, Flavour::Ascii);
+    }
+
+    let pam = opts.pam || opts.tupltype.is_some() || fmt.has_alpha();
+    if pam {
+        let tupltype = opts.tupltype.as_deref().unwrap_or(standard_tupltype(fmt));
+        if is_natural {
+            let fast = match fmt {
+                PbmPixelFormat::Gray8 => Some(encode_p7_gray8(plane, w, h, tupltype)),
+                PbmPixelFormat::Gray16Le => Some(encode_p7_gray16(plane, w, h, tupltype)),
+                PbmPixelFormat::Rgb24 => Some(encode_p7_rgb8(plane, w, h, tupltype)),
+                PbmPixelFormat::Rgb48Le => Some(encode_p7_rgb16(plane, w, h, tupltype)),
+                PbmPixelFormat::Rgba => Some(encode_p7_rgba8(plane, w, h, tupltype)),
+                PbmPixelFormat::Bgra => Some(encode_p7_bgra8(plane, w, h, tupltype)),
+                PbmPixelFormat::Rgba64Le => Some(encode_p7_rgba16(plane, w, h, tupltype)),
+                PbmPixelFormat::Ya8 => Some(encode_p7_ya8(plane, w, h, tupltype)),
+                PbmPixelFormat::Ya16Le => Some(encode_p7_ya16(plane, w, h, tupltype)),
+                _ => None,
+            };
+            if let Some(out) = fast {
+                return out;
+            }
+        }
+        return encode_generic(plane, fmt, w, h, maxval, Flavour::Pam(tupltype));
+    }
+
+    if is_natural {
+        return match fmt {
+            PbmPixelFormat::MonoBlack => encode_p4(plane, w, h),
+            PbmPixelFormat::Gray8 => encode_p5_gray8(plane, w, h),
+            PbmPixelFormat::Gray16Le => encode_p5_gray16(plane, w, h),
+            PbmPixelFormat::Rgb24 => encode_p6_rgb8(plane, w, h),
+            _ => encode_p6_rgb16(plane, w, h),
+        };
+    }
+    encode_generic(plane, fmt, w, h, maxval, Flavour::Raw)
+}
+
+/// Read the `channels` samples of pixel `x` in `row` as integers in
+/// the layout's native range (`0..=in_max`), writing them to `out` in
+/// R, G, B, A order (`Bgra` reordered; bilevel as the PAM
+/// `BLACKANDWHITE` sense, 1 = white).
+fn pixel_samples(fmt: PbmPixelFormat, row: &[u8], x: usize, out: &mut [u32; 4]) {
+    match fmt {
+        PbmPixelFormat::MonoBlack | PbmPixelFormat::MonoWhite => {
+            let bit = (row[x / 8] >> (7 - (x % 8))) & 1;
+            out[0] = u32::from(bit ^ 1);
+        }
+        PbmPixelFormat::Gray8 => out[0] = u32::from(row[x]),
+        PbmPixelFormat::Ya8 => {
+            out[0] = u32::from(row[x * 2]);
+            out[1] = u32::from(row[x * 2 + 1]);
+        }
+        PbmPixelFormat::Rgb24 => {
+            for c in 0..3 {
+                out[c] = u32::from(row[x * 3 + c]);
+            }
+        }
+        PbmPixelFormat::Rgba => {
+            for c in 0..4 {
+                out[c] = u32::from(row[x * 4 + c]);
+            }
+        }
+        PbmPixelFormat::Bgra => {
+            out[0] = u32::from(row[x * 4 + 2]);
+            out[1] = u32::from(row[x * 4 + 1]);
+            out[2] = u32::from(row[x * 4]);
+            out[3] = u32::from(row[x * 4 + 3]);
+        }
+        PbmPixelFormat::Gray16Le
+        | PbmPixelFormat::Ya16Le
+        | PbmPixelFormat::Rgb48Le
+        | PbmPixelFormat::Rgba64Le => {
+            let ch = fmt.channels();
+            for (c, o) in out.iter_mut().enumerate().take(ch) {
+                let off = (x * ch + c) * 2;
+                *o = u32::from(u16::from_le_bytes([row[off], row[off + 1]]));
+            }
+        }
+        PbmPixelFormat::GrayF32Le | PbmPixelFormat::RgbF32Le => {}
+    }
+}
+
+/// The generic sample-wise writer for every non-natural `MAXVAL` and
+/// for PAM `BLACKANDWHITE`: each sample is rescaled by round-half-up
+/// from the layout's native range to `0..=maxval` and written as a
+/// decimal token (`Ascii`), one byte / two big-endian bytes (`Raw`,
+/// `Pam`). Slower than the natural-maxval memcpy writers, which is fine
+/// for an explicitly requested flavour.
+fn encode_generic(
+    plane: &PbmPlane,
+    fmt: PbmPixelFormat,
+    w: usize,
+    h: usize,
+    maxval: u32,
+    flavour: Flavour<'_>,
+) -> Result<Vec<u8>> {
+    let channels = fmt.channels();
+    let in_max = natural_maxval(fmt);
+    let row_bytes = fmt
+        .row_bytes(w as u32)
+        .ok_or_else(|| Error::invalid("Netpbm encoder: row-size overflow"))?;
+    let scale = |v: u32| -> u32 {
+        if in_max == maxval {
+            v
+        } else {
+            ((u64::from(v) * u64::from(maxval) + u64::from(in_max) / 2) / u64::from(in_max)) as u32
+        }
+    };
+    let magic = match (flavour, channels) {
+        (Flavour::Pam(_), _) => Magic::P7Pam,
+        (Flavour::Ascii, 1) if fmt.is_bilevel() => Magic::P1AsciiBitmap,
+        (Flavour::Ascii, 1) => Magic::P2AsciiGraymap,
+        (Flavour::Ascii, _) => Magic::P3AsciiPixmap,
+        (Flavour::Raw, 1) if fmt.is_bilevel() => Magic::P4BinaryBitmap,
+        (Flavour::Raw, 1) => Magic::P5BinaryGraymap,
+        (Flavour::Raw, _) => Magic::P6BinaryPixmap,
+    };
+    let mut out = match flavour {
+        Flavour::Pam(t) => header_pam(w, h, channels as u32, maxval, t),
+        _ => header_pnm(
+            magic,
+            w,
+            h,
+            if fmt.is_bilevel() { None } else { Some(maxval) },
+        ),
+    };
+    let mut px = [0u32; 4];
+    let wide = maxval > 255;
+    match flavour {
+        Flavour::Ascii => {
+            let mut samples: Vec<u16> = Vec::with_capacity(w * h * channels);
+            for y in 0..h {
+                let row = &plane.data[y * plane.stride..y * plane.stride + row_bytes];
+                for x in 0..w {
+                    pixel_samples(fmt, row, x, &mut px);
+                    for &s in px.iter().take(channels) {
+                        // P1 is the wire sense (1 = black), the inverse of
+                        // the PAM sense `pixel_samples` reports.
+                        let v = if fmt.is_bilevel() { s ^ 1 } else { scale(s) };
+                        samples.push(v as u16);
+                    }
+                }
+            }
+            out.extend(encode_ascii_body(&samples, (w * channels) as u32));
+        }
+        Flavour::Raw if fmt.is_bilevel() => {
+            // Natural P4 — only reachable through the bilevel short
+            // circuit (bilevel has no MAXVAL knob), kept for completeness.
+            return encode_p4(plane, w, h);
+        }
+        Flavour::Raw | Flavour::Pam(_) => {
+            for y in 0..h {
+                let row = &plane.data[y * plane.stride..y * plane.stride + row_bytes];
+                for x in 0..w {
+                    pixel_samples(fmt, row, x, &mut px);
+                    for &s in px.iter().take(channels) {
+                        let v = if fmt.is_bilevel() { s } else { scale(s) };
+                        if wide {
+                            out.extend_from_slice(&(v as u16).to_be_bytes());
+                        } else {
+                            out.push(v as u8);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Deprecated pre-contract entry points (one release)
+// ---------------------------------------------------------------------------
+
 /// Encode a [`PbmImage`] into the closest matching binary Netpbm
 /// variant.
+///
+/// Deprecated: use [`crate::encode`] with `EncodeOptions::default()`.
+#[deprecated(note = "use oxideav_pbm::encode (IMAGE_CRATE_API)")]
+#[allow(deprecated)]
 pub fn encode_pbm(image: &PbmImage) -> Result<Vec<u8>> {
     if image.planes.is_empty() {
         return Err(Error::invalid("PBM encoder: empty plane"));
     }
-    encode_pbm_plane(
-        &image.planes[0],
-        image.pixel_format,
-        image.width,
-        image.height,
-    )
+    encode_pbm_plane(&image.planes[0], image.format, image.width, image.height)
 }
 
 /// Output-format selector for [`encode_pbm_with_format`].
@@ -149,6 +436,10 @@ pub fn encode_pbm(image: &PbmImage) -> Result<Vec<u8>> {
 /// specific magic; the encoder still returns `Unsupported` if the
 /// input pixel format cannot be represented in that magic (e.g. P1
 /// only accepts `MonoBlack`).
+///
+/// Deprecated: the flavour is selected by [`EncodeOptions`] fields
+/// (`ascii`, `pam`, `tupltype`, `maxval`, `pfm_*`).
+#[deprecated(note = "use oxideav_pbm::EncodeOptions fields (IMAGE_CRATE_API)")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PbmEncodeFormat {
     /// Pick the closest binary magic (P4/P5/P6/P7) — same as
@@ -183,7 +474,7 @@ pub enum PbmEncodeFormat {
     /// the encoder always emits P4 for `MonoBlack` since P7
     /// `BLACKANDWHITE` would be a bigger header for the same payload).
     Pam7,
-    /// Force Portable FloatMap (`Pf` for `GrayF32`, `PF` for `RgbF32`).
+    /// Force Portable FloatMap (`Pf` for `GrayF32Le`, `PF` for `RgbF32Le`).
     /// Only valid for the two float pixel formats; emits little-endian
     /// samples with a unit scale. Callers needing an explicit byte order
     /// or scale use [`crate::pfm::encode_pfm`] directly.
@@ -195,6 +486,10 @@ pub enum PbmEncodeFormat {
 /// `Auto*` variants delegate to [`encode_pbm`] / [`encode_pbm_ascii`].
 /// Explicit `Pnm*` / `Pam7` variants force the specified magic and
 /// reject pixel formats that can't be represented in it.
+///
+/// Deprecated: use [`crate::encode`] with [`EncodeOptions`].
+#[deprecated(note = "use oxideav_pbm::encode with EncodeOptions (IMAGE_CRATE_API)")]
+#[allow(deprecated)]
 pub fn encode_pbm_with_format(image: &PbmImage, format: PbmEncodeFormat) -> Result<Vec<u8>> {
     if image.planes.is_empty() {
         return Err(Error::invalid("PBM encoder: empty plane"));
@@ -208,64 +503,70 @@ pub fn encode_pbm_with_format(image: &PbmImage, format: PbmEncodeFormat) -> Resu
     match format {
         PbmEncodeFormat::AutoBinary => encode_pbm(image),
         PbmEncodeFormat::AutoAscii => encode_pbm_ascii(image),
-        PbmEncodeFormat::Pnm1 => match image.pixel_format {
+        PbmEncodeFormat::Pnm1 => match image.format {
             PbmPixelFormat::MonoBlack => Ok(emit_ascii_pbm_header_and_body(plane, w, h)),
+            PbmPixelFormat::MonoWhite => Ok(emit_ascii_pbm_header_and_body(
+                &invert_bilevel(plane, w, h),
+                w,
+                h,
+            )),
             other => Err(Error::unsupported(format!(
                 "PBM encoder: pixel format {other:?} cannot be emitted as P1"
             ))),
         },
-        PbmEncodeFormat::Pnm2 => match image.pixel_format {
+        PbmEncodeFormat::Pnm2 => match image.format {
             PbmPixelFormat::Gray8 => Ok(emit_ascii_pgm_8(plane, w, h)),
             PbmPixelFormat::Gray16Le => Ok(emit_ascii_pgm_16(plane, w, h)),
             other => Err(Error::unsupported(format!(
                 "PBM encoder: pixel format {other:?} cannot be emitted as P2"
             ))),
         },
-        PbmEncodeFormat::Pnm3 => match image.pixel_format {
+        PbmEncodeFormat::Pnm3 => match image.format {
             PbmPixelFormat::Rgb24 => Ok(emit_ascii_ppm_8(plane, w, h)),
             PbmPixelFormat::Rgb48Le => Ok(emit_ascii_ppm_16(plane, w, h)),
             other => Err(Error::unsupported(format!(
                 "PBM encoder: pixel format {other:?} cannot be emitted as P3"
             ))),
         },
-        PbmEncodeFormat::Pnm4 => match image.pixel_format {
+        PbmEncodeFormat::Pnm4 => match image.format {
             PbmPixelFormat::MonoBlack => encode_p4(plane, w, h),
+            PbmPixelFormat::MonoWhite => encode_p4(&invert_bilevel(plane, w, h), w, h),
             other => Err(Error::unsupported(format!(
                 "PBM encoder: pixel format {other:?} cannot be emitted as P4"
             ))),
         },
-        PbmEncodeFormat::Pnm5 => match image.pixel_format {
+        PbmEncodeFormat::Pnm5 => match image.format {
             PbmPixelFormat::Gray8 => encode_p5_gray8(plane, w, h),
             PbmPixelFormat::Gray16Le => encode_p5_gray16(plane, w, h),
             other => Err(Error::unsupported(format!(
                 "PBM encoder: pixel format {other:?} cannot be emitted as P5"
             ))),
         },
-        PbmEncodeFormat::Pnm6 => match image.pixel_format {
+        PbmEncodeFormat::Pnm6 => match image.format {
             PbmPixelFormat::Rgb24 => encode_p6_rgb8(plane, w, h),
             PbmPixelFormat::Rgb48Le => encode_p6_rgb16(plane, w, h),
             other => Err(Error::unsupported(format!(
                 "PBM encoder: pixel format {other:?} cannot be emitted as P6"
             ))),
         },
-        PbmEncodeFormat::Pam7 => match image.pixel_format {
-            PbmPixelFormat::Gray8 => encode_p7_gray8(plane, w, h),
-            PbmPixelFormat::Gray16Le => encode_p7_gray16(plane, w, h),
-            PbmPixelFormat::Rgb24 => encode_p7_rgb8(plane, w, h),
-            PbmPixelFormat::Rgb48Le => encode_p7_rgb16(plane, w, h),
-            PbmPixelFormat::Rgba => encode_p7_rgba8(plane, w, h),
-            PbmPixelFormat::Bgra => encode_p7_bgra8(plane, w, h),
-            PbmPixelFormat::Rgba64Le => encode_p7_rgba16(plane, w, h),
-            PbmPixelFormat::Ya8 => encode_p7_ya8(plane, w, h),
-            PbmPixelFormat::Ya16Le => encode_p7_ya16(plane, w, h),
+        PbmEncodeFormat::Pam7 => match image.format {
+            PbmPixelFormat::Gray8 => encode_p7_gray8(plane, w, h, "GRAYSCALE"),
+            PbmPixelFormat::Gray16Le => encode_p7_gray16(plane, w, h, "GRAYSCALE"),
+            PbmPixelFormat::Rgb24 => encode_p7_rgb8(plane, w, h, "RGB"),
+            PbmPixelFormat::Rgb48Le => encode_p7_rgb16(plane, w, h, "RGB"),
+            PbmPixelFormat::Rgba => encode_p7_rgba8(plane, w, h, "RGB_ALPHA"),
+            PbmPixelFormat::Bgra => encode_p7_bgra8(plane, w, h, "RGB_ALPHA"),
+            PbmPixelFormat::Rgba64Le => encode_p7_rgba16(plane, w, h, "RGB_ALPHA"),
+            PbmPixelFormat::Ya8 => encode_p7_ya8(plane, w, h, "GRAYSCALE_ALPHA"),
+            PbmPixelFormat::Ya16Le => encode_p7_ya16(plane, w, h, "GRAYSCALE_ALPHA"),
             other => Err(Error::unsupported(format!(
                 "PBM encoder: pixel format {other:?} cannot be emitted as P7"
             ))),
         },
-        PbmEncodeFormat::Pfm => match image.pixel_format {
-            PbmPixelFormat::GrayF32 | PbmPixelFormat::RgbF32 => crate::pfm::encode_pfm_plane(
+        PbmEncodeFormat::Pfm => match image.format {
+            PbmPixelFormat::GrayF32Le | PbmPixelFormat::RgbF32Le => crate::pfm::encode_pfm_plane(
                 plane,
-                image.pixel_format,
+                image.format,
                 image.width,
                 image.height,
                 true,
@@ -282,6 +583,10 @@ pub fn encode_pbm_with_format(image: &PbmImage, format: PbmEncodeFormat) -> Resu
 /// into a binary Netpbm file. Lower-level than [`encode_pbm`] for
 /// callers that already have plane bytes laid out without a wrapping
 /// [`PbmImage`].
+///
+/// Deprecated: build a [`PbmImage`] with [`PbmImage::packed`] and use
+/// [`crate::encode`].
+#[deprecated(note = "use oxideav_pbm::encode (IMAGE_CRATE_API)")]
 pub fn encode_pbm_plane(
     plane: &PbmPlane,
     format: PbmPixelFormat,
@@ -295,19 +600,20 @@ pub fn encode_pbm_plane(
     }
     match format {
         PbmPixelFormat::MonoBlack => encode_p4(plane, w, h),
+        PbmPixelFormat::MonoWhite => encode_p4(&invert_bilevel(plane, w, h), w, h),
         PbmPixelFormat::Gray8 => encode_p5_gray8(plane, w, h),
         PbmPixelFormat::Gray16Le => encode_p5_gray16(plane, w, h),
         PbmPixelFormat::Rgb24 => encode_p6_rgb8(plane, w, h),
         PbmPixelFormat::Rgb48Le => encode_p6_rgb16(plane, w, h),
-        PbmPixelFormat::Rgba => encode_p7_rgba8(plane, w, h),
-        PbmPixelFormat::Bgra => encode_p7_bgra8(plane, w, h),
-        PbmPixelFormat::Rgba64Le => encode_p7_rgba16(plane, w, h),
-        PbmPixelFormat::Ya8 => encode_p7_ya8(plane, w, h),
-        PbmPixelFormat::Ya16Le => encode_p7_ya16(plane, w, h),
+        PbmPixelFormat::Rgba => encode_p7_rgba8(plane, w, h, "RGB_ALPHA"),
+        PbmPixelFormat::Bgra => encode_p7_bgra8(plane, w, h, "RGB_ALPHA"),
+        PbmPixelFormat::Rgba64Le => encode_p7_rgba16(plane, w, h, "RGB_ALPHA"),
+        PbmPixelFormat::Ya8 => encode_p7_ya8(plane, w, h, "GRAYSCALE_ALPHA"),
+        PbmPixelFormat::Ya16Le => encode_p7_ya16(plane, w, h, "GRAYSCALE_ALPHA"),
         // Float maps have no integer Netpbm form — emit Portable
         // FloatMap (`Pf` / `PF`). Default to little-endian (no byte swap
         // from the little-endian in-memory plane) with a unit scale.
-        PbmPixelFormat::GrayF32 | PbmPixelFormat::RgbF32 => {
+        PbmPixelFormat::GrayF32Le | PbmPixelFormat::RgbF32Le => {
             crate::pfm::encode_pfm_plane(plane, format, width, height, true, 1.0)
         }
     }
@@ -316,19 +622,21 @@ pub fn encode_pbm_plane(
 /// ASCII variant: emit P1/P2/P3 from a [`PbmImage`]. Less efficient
 /// (≥ 3× larger on disk) but the man pages still document the plain
 /// forms and some tools require them.
+///
+/// Deprecated: use [`crate::encode`] with `EncodeOptions::new().with_ascii(true)`.
+#[deprecated(note = "use oxideav_pbm::encode with EncodeOptions::with_ascii (IMAGE_CRATE_API)")]
+#[allow(deprecated)]
 pub fn encode_pbm_ascii(image: &PbmImage) -> Result<Vec<u8>> {
     if image.planes.is_empty() {
         return Err(Error::invalid("PBM ASCII encoder: empty plane"));
     }
-    encode_pbm_ascii_plane(
-        &image.planes[0],
-        image.pixel_format,
-        image.width,
-        image.height,
-    )
+    encode_pbm_ascii_plane(&image.planes[0], image.format, image.width, image.height)
 }
 
 /// ASCII variant: emit P1/P2/P3 from a single plane.
+///
+/// Deprecated: use [`crate::encode`] with `EncodeOptions::new().with_ascii(true)`.
+#[deprecated(note = "use oxideav_pbm::encode with EncodeOptions::with_ascii (IMAGE_CRATE_API)")]
 pub fn encode_pbm_ascii_plane(
     plane: &PbmPlane,
     format: PbmPixelFormat,
@@ -339,6 +647,11 @@ pub fn encode_pbm_ascii_plane(
     let h = height as usize;
     match format {
         PbmPixelFormat::MonoBlack => Ok(emit_ascii_pbm_header_and_body(plane, w, h)),
+        PbmPixelFormat::MonoWhite => Ok(emit_ascii_pbm_header_and_body(
+            &invert_bilevel(plane, w, h),
+            w,
+            h,
+        )),
         PbmPixelFormat::Gray8 => Ok(emit_ascii_pgm_8(plane, w, h)),
         PbmPixelFormat::Gray16Le => Ok(emit_ascii_pgm_16(plane, w, h)),
         PbmPixelFormat::Rgb24 => Ok(emit_ascii_ppm_8(plane, w, h)),
@@ -468,16 +781,16 @@ fn header_pam(w: usize, h: usize, depth: u32, maxval: u32, tupltype: &str) -> Ve
     out
 }
 
-fn encode_p7_gray8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
-    let mut out = header_pam(w, h, 1, 255, "GRAYSCALE");
+fn encode_p7_gray8(plane: &PbmPlane, w: usize, h: usize, tupltype: &str) -> Result<Vec<u8>> {
+    let mut out = header_pam(w, h, 1, 255, tupltype);
     for y in 0..h {
         out.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w]);
     }
     Ok(out)
 }
 
-fn encode_p7_gray16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
-    let mut out = header_pam(w, h, 1, 65535, "GRAYSCALE");
+fn encode_p7_gray16(plane: &PbmPlane, w: usize, h: usize, tupltype: &str) -> Result<Vec<u8>> {
+    let mut out = header_pam(w, h, 1, 65535, tupltype);
     // Identical body shape to P5 16-bit (PAM `GRAYSCALE` with depth 1 is
     // a single-sample row-major stream); funnel the LE→BE swap through
     // the row-level `swap_bytes_u16_row` helper so the inner loop walks
@@ -498,16 +811,16 @@ fn encode_p7_gray16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn encode_p7_rgb8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
-    let mut out = header_pam(w, h, 3, 255, "RGB");
+fn encode_p7_rgb8(plane: &PbmPlane, w: usize, h: usize, tupltype: &str) -> Result<Vec<u8>> {
+    let mut out = header_pam(w, h, 3, 255, tupltype);
     for y in 0..h {
         out.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w * 3]);
     }
     Ok(out)
 }
 
-fn encode_p7_rgb16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
-    let mut out = header_pam(w, h, 3, 65535, "RGB");
+fn encode_p7_rgb16(plane: &PbmPlane, w: usize, h: usize, tupltype: &str) -> Result<Vec<u8>> {
+    let mut out = header_pam(w, h, 3, 65535, tupltype);
     // Identical body shape to P6 16-bit (PAM with `RGB` tupltype is the
     // same row-major three-sample layout); reuse the row-level swap.
     let row_bytes = w * 6;
@@ -521,15 +834,15 @@ fn encode_p7_rgb16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn encode_p7_rgba8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
-    let mut out = header_pam(w, h, 4, 255, "RGB_ALPHA");
+fn encode_p7_rgba8(plane: &PbmPlane, w: usize, h: usize, tupltype: &str) -> Result<Vec<u8>> {
+    let mut out = header_pam(w, h, 4, 255, tupltype);
     for y in 0..h {
         out.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w * 4]);
     }
     Ok(out)
 }
 
-fn encode_p7_bgra8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
+fn encode_p7_bgra8(plane: &PbmPlane, w: usize, h: usize, tupltype: &str) -> Result<Vec<u8>> {
     // Reorder BGRA → RGBA on the way out so the file declares RGB_ALPHA
     // and any decoder reads them back as such. The per-row channel
     // shuffle is handled by `binary::bgra_to_rgba_row`, which walks
@@ -544,7 +857,7 @@ fn encode_p7_bgra8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     // P7 GRAYSCALE_ALPHA) all run `extend_from_slice` over a
     // contiguous row.
     let row_bytes = w * 4;
-    let mut out = header_pam(w, h, 4, 255, "RGB_ALPHA");
+    let mut out = header_pam(w, h, 4, 255, tupltype);
     let body_start = out.len();
     out.resize(body_start + row_bytes * h, 0);
     for y in 0..h {
@@ -555,8 +868,8 @@ fn encode_p7_bgra8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn encode_p7_rgba16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
-    let mut out = header_pam(w, h, 4, 65535, "RGB_ALPHA");
+fn encode_p7_rgba16(plane: &PbmPlane, w: usize, h: usize, tupltype: &str) -> Result<Vec<u8>> {
+    let mut out = header_pam(w, h, 4, 65535, tupltype);
     // Four 16-bit channels per pixel (R/G/B/A); the row-level swap is
     // channel-agnostic so we reuse the same helper.
     let row_bytes = w * 8;
@@ -570,16 +883,16 @@ fn encode_p7_rgba16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn encode_p7_ya8(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
-    let mut out = header_pam(w, h, 2, 255, "GRAYSCALE_ALPHA");
+fn encode_p7_ya8(plane: &PbmPlane, w: usize, h: usize, tupltype: &str) -> Result<Vec<u8>> {
+    let mut out = header_pam(w, h, 2, 255, tupltype);
     for y in 0..h {
         out.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + w * 2]);
     }
     Ok(out)
 }
 
-fn encode_p7_ya16(plane: &PbmPlane, w: usize, h: usize) -> Result<Vec<u8>> {
-    let mut out = header_pam(w, h, 2, 65535, "GRAYSCALE_ALPHA");
+fn encode_p7_ya16(plane: &PbmPlane, w: usize, h: usize, tupltype: &str) -> Result<Vec<u8>> {
+    let mut out = header_pam(w, h, 2, 65535, tupltype);
     // Two 16-bit channels per pixel (Y, A) held little-endian in the
     // plane; the wire wants big-endian. The row-level swap is
     // channel-agnostic (it just walks 2-byte samples), so the same
@@ -668,6 +981,7 @@ fn emit_ascii_ppm_16(plane: &PbmPlane, w: usize, h: usize) -> Vec<u8> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 
@@ -678,13 +992,7 @@ mod tests {
         stride: usize,
         data: Vec<u8>,
     ) -> PbmImage {
-        PbmImage {
-            width: w,
-            height: h,
-            pixel_format: format,
-            planes: vec![PbmPlane { stride, data }],
-            pts: None,
-        }
+        PbmImage::packed(w, h, format, stride, data).unwrap()
     }
 
     #[test]

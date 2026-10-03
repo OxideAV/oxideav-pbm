@@ -4,10 +4,9 @@
 //! Covers all eight Netpbm magic numbers — the seven classic PNM
 //! variants plus PAM (P7) — and the floating-point Portable FloatMap
 //! sibling (`Pf` / `PF`) in one self-contained crate. Spec sources are
-//! the Netpbm man pages (`pbm(5)`, `pgm(5)`, `ppm(5)`, `pnm(5)`,
-//! `pam(5)`) and the Debevec PFM reference
-//! (`docs/image/netpbm/pfm-portable-floatmap.md`). No external
-//! implementation source was consulted.
+//! the staged family reference (`docs/image/pbm/`) and the Debevec PFM
+//! reference (`docs/image/netpbm/pfm-portable-floatmap.md`). No
+//! external implementation source was consulted.
 //!
 //! | Magic | Name | Encoding | Channels | Bit depth |
 //! |-------|------|----------|----------|-----------|
@@ -21,29 +20,59 @@
 //! | `Pf`  | PFM  | Binary   | 1 (gray)   | 32 (IEEE-754 float) |
 //! | `PF`  | PFM  | Binary   | 3 (RGB)    | 32 (IEEE-754 float) |
 //!
-//! Every PNM/PAM magic decodes to a [`PbmImage`] tagged with one of the
-//! integer [`PbmPixelFormat`] variants; the encoder picks the closest
-//! binary form (P4/P5/P6/P7) for any supported pixel format. ASCII-form
-//! output is also available via [`encode_pbm_ascii`]. The two PFM magics
-//! decode/encode IEEE-754 binary32 samples (the
-//! [`PbmPixelFormat::GrayF32`] / [`PbmPixelFormat::RgbF32`] variants) via
-//! the dedicated [`decode_pfm`] / [`encode_pfm`] entry points (see the
-//! [`pfm`] module); [`decode_pbm`] / [`encode_pbm`] also route `Pf` / `PF`
-//! to that path automatically.
+//! # Standalone use (`IMAGE_CRATE_API`)
 //!
-//! Comments (`# … LF`) are tolerated everywhere the Netpbm spec
+//! The crate exposes the OxideAV image-crate contract at its root —
+//! [`probe`], [`info`], [`decode`] / [`decode_with`] / [`decode_rgb8`] /
+//! [`decode_rgba8`] / [`decode_all`] / [`decode_from`], [`encode`] /
+//! [`encode_rgb8`] / [`encode_rgba8`] / [`encode_to`] — around
+//! [`PbmImage`] (native layout, one packed [`Plane`], [`ColorInfo`],
+//! [`Metadata`]), [`RgbImage`] / [`RgbaImage`], [`ImageInfo`], [`Frame`],
+//! [`DecodeOptions`], [`EncodeOptions`], [`PixelFormat`] (=
+//! [`PbmPixelFormat`], names mirroring `oxideav_core::PixelFormat`) and
+//! [`Error`] (= [`PbmError`]). It builds with `default-features = false`
+//! and no `oxideav-core`.
+//!
+//! ```
+//! let bytes = oxideav_pbm::encode_rgb8(2, 1, &[255, 0, 0, 0, 0, 255], &Default::default())?;
+//! assert!(oxideav_pbm::probe(&bytes));
+//! let info = oxideav_pbm::info(&bytes)?;
+//! assert_eq!((info.width, info.height, info.frames), (2, 1, 1));
+//! let img = oxideav_pbm::decode(&bytes)?;             // PbmImage, native Rgb24
+//! let rgba: Vec<u8> = img.to_rgba8();                  // 4 × width bytes per row
+//! let opts = oxideav_pbm::EncodeOptions::default().with_ascii(true);
+//! let p3 = oxideav_pbm::encode_rgba8(img.width(), img.height(), &rgba, &opts);
+//! assert!(p3.is_err());                                // P1 / P2 / P3 cannot carry alpha
+//! let p3 = oxideav_pbm::encode(&img, &opts)?;
+//! assert!(p3.starts_with(b"P3\n"));
+//! # Ok::<(), oxideav_pbm::Error>(())
+//! ```
+//!
+//! Every PNM/PAM magic decodes to a [`PbmImage`] tagged with one of the
+//! integer [`PbmPixelFormat`] variants; the two PFM magics decode to the
+//! [`PbmPixelFormat::GrayF32Le`] / [`PbmPixelFormat::RgbF32Le`] native
+//! float layouts (tone-scaled only inside [`PbmImage::to_rgb8`] /
+//! [`PbmImage::to_rgba8`]). The encoder writes each layout in its
+//! natural raw magic; [`EncodeOptions`] fields select the plain-text
+//! forms, the PAM container, a custom `MAXVAL` / `TUPLTYPE`, and the
+//! PFM byte order / scale. The depth APIs ([`parse_header`],
+//! [`iter_pnm_header_comments`], the [`pfm`] scale helpers) keep their
+//! names.
+//!
+//! Comments (`# … LF`) are tolerated everywhere the Netpbm grammar
 //! permits them — in headers and in the bodies of P1/P2/P3 — and any
 //! ASCII whitespace separates header tokens / ASCII samples.
 //!
-//! ## Standalone vs registry-integrated
+//! # Framework use
 //!
 //! The crate's default `registry` Cargo feature pulls in `oxideav-core`
-//! and exposes the framework `Decoder` / `Encoder` trait surface plus
-//! a [`registry::register`] entry point. Disable the feature
-//! (`default-features = false`) for an `oxideav-core`-free build that
-//! still exposes the standalone [`decode_pbm`] / [`encode_pbm`] /
-//! [`encode_pbm_ascii`] API.
+//! and exposes `register` (`RuntimeContext`), `register_codecs` /
+//! `register_containers`, the `make_decoder` / `make_encoder`
+//! factories, and the frame bridge (`From<PbmImage> for VideoFrame`,
+//! `PbmImage::from_video_frame`). The trait-side `Decoder` /
+//! `Encoder` are thin adapters over the standalone functions.
 
+pub mod api;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub mod ascii;
@@ -57,43 +86,75 @@ pub mod encoder;
 pub mod error;
 pub mod header;
 pub mod image;
+pub mod options;
 pub mod pfm;
 #[cfg(feature = "registry")]
 pub mod registry;
 
-/// Codec id for Netpbm image frames. All eight magics share this id —
+/// Codec id for Netpbm image frames. All nine magics share this id —
 /// the body itself is self-describing.
 pub const CODEC_ID_STR: &str = "pbm";
 
-pub use decoder::{
-    decode_pbm, decode_pbm_consumed, decode_pbm_header_consumed, decode_pbm_multi,
-    decode_pbm_multi_with_headers,
+// ---- the contract surface (IMAGE_CRATE_API) ---------------------------------
+pub use api::{
+    decode, decode_all, decode_all_with, decode_from, decode_rgb8, decode_rgba8, decode_with,
+    encode, encode_rgb8, encode_rgba8, encode_to, info, probe,
 };
-pub use encoder::{
-    encode_pbm, encode_pbm_ascii, encode_pbm_ascii_plane, encode_pbm_plane, encode_pbm_with_format,
-    PbmEncodeFormat,
+pub use error::{Error, PbmError, Result};
+pub use image::{
+    ColorInfo, ColorRange, Frame, ImageInfo, Metadata, PbmImage, PbmPixelFormat, PixelFormat,
+    Plane, RgbImage, RgbaImage,
 };
-pub use error::{PbmError, Result};
+pub use options::{DecodeOptions, EncodeOptions};
+
+// ---- depth APIs (keep their names) -------------------------------------------
 pub use header::{
-    iter_pnm_header_comments, parse_header, peek_magic, probe_is_netpbm, Header, Magic, PfmInfo,
-    PnmHeaderComments, Tupltype,
+    iter_pnm_header_comments, parse_header, peek_magic, Header, Magic, PfmInfo, PnmHeaderComments,
+    Tupltype,
 };
-pub use image::{PbmImage, PbmPixelFormat, PbmPlane};
 pub use pfm::{
     apply_inverse_pfm_scale, apply_pfm_scale, decode_pfm, decode_pfm_consumed, decode_pfm_multi,
     decode_pfm_scaled, encode_pfm, encode_pfm_plane, encode_pfm_scaled, PfmHeaderInfo,
 };
 
+// ---- deprecated pre-contract entry points (one release) ----------------------
+#[allow(deprecated)]
+pub use decoder::{
+    decode_pbm, decode_pbm_consumed, decode_pbm_header_consumed, decode_pbm_multi,
+    decode_pbm_multi_with_headers,
+};
+#[allow(deprecated)]
+pub use encoder::{
+    encode_pbm, encode_pbm_ascii, encode_pbm_ascii_plane, encode_pbm_plane, encode_pbm_with_format,
+    PbmEncodeFormat,
+};
+#[allow(deprecated)]
+pub use image::PbmPlane;
+
+/// Former name of [`probe`].
+#[deprecated(note = "use oxideav_pbm::probe (IMAGE_CRATE_API)")]
+pub fn probe_is_netpbm(input: &[u8]) -> bool {
+    probe(input)
+}
+
+#[cfg(feature = "registry")]
+pub use decoder::make_decoder;
+#[cfg(feature = "registry")]
+pub use encoder::make_encoder;
 #[cfg(feature = "registry")]
 pub use registry::{
-    pbm_to_pixel_format, pixel_format_to_pbm, register, register_codecs, register_containers,
+    from_core_pixel_format, register, register_codecs, register_containers, to_core_pixel_format,
 };
+#[cfg(feature = "registry")]
+#[allow(deprecated)]
+pub use registry::{pbm_to_pixel_format, pixel_format_to_pbm};
 
 #[cfg(feature = "registry")]
 #[doc(hidden)]
 pub use registry::__oxideav_entry;
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 
@@ -106,16 +167,7 @@ mod tests {
                 data.extend_from_slice(&rgb);
             }
         }
-        PbmImage {
-            width: w,
-            height: h,
-            pixel_format: PbmPixelFormat::Rgb24,
-            planes: vec![PbmPlane {
-                stride: w as usize * 3,
-                data,
-            }],
-            pts: None,
-        }
+        PbmImage::packed(w, h, PbmPixelFormat::Rgb24, w as usize * 3, data).unwrap()
     }
 
     #[test]
@@ -141,13 +193,7 @@ mod tests {
                 ]);
             }
         }
-        let src = PbmImage {
-            width: 6,
-            height: 4,
-            pixel_format: PbmPixelFormat::Rgba,
-            planes: vec![PbmPlane { stride: 24, data }],
-            pts: None,
-        };
+        let src = PbmImage::packed(6, 4, PbmPixelFormat::Rgba, 24, data).unwrap();
         let bytes = encode_pbm(&src).unwrap();
         assert!(bytes.starts_with(b"P7\n"));
         let (back, fmt) = decode_pbm(&bytes).unwrap();
