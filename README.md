@@ -35,6 +35,7 @@ if oxideav_pbm::probe(&bytes) {
     let pam: Vec<u8> = oxideav_pbm::encode_rgba8(w, h, &rgba, &opts)?;           // P7 RGB_ALPHA
     std::fs::write("out.pam", pam)?;
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 | Item | Signature |
@@ -80,11 +81,18 @@ With the default-on `registry` feature the crate plugs into the
 `oxideav-core` registry:
 
 ```rust
+# let img = oxideav_pbm::PbmImage::from_rgb8(1, 1, vec![255, 0, 0])?;
+# let mut params = oxideav_core::CodecParameters::video(oxideav_core::CodecId::new("pbm"));
+# params.width = Some(1);
+# params.height = Some(1);
+# params.pixel_format = Some(oxideav_core::PixelFormat::Rgb24);
 let mut ctx = oxideav_core::RuntimeContext::new();
 oxideav_pbm::register(&mut ctx);                       // codec "pbm" + the Netpbm container (.pbm .pgm .ppm .pnm .pam .pfm)
 let dec = oxideav_pbm::make_decoder(&params)?;         // / make_encoder (options: ascii, pam, maxval, tupltype, pfm_little_endian, pfm_scale)
 let frame: oxideav_core::VideoFrame = img.into();      // From<PbmImage>: the one packed plane
 let back = oxideav_pbm::PbmImage::from_video_frame(&frame, &params)?;   // also TryFrom<(&VideoFrame, &CodecParameters)>
+# let _ = (dec, back);
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 The trait-side `Decoder` / `Encoder` are thin adapters over the
