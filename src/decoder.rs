@@ -210,20 +210,27 @@ pub(crate) fn is_ascii_ws(c: u8) -> bool {
 /// `(image, header)` pairs in stream order. Shared engine of
 /// [`crate::decode_all_with`] and the deprecated multi-image wrappers.
 ///
-/// Inter-image ASCII whitespace is skipped before the next magic is
-/// read — the magic must be the first two bytes of each image, so a `#`
-/// between images is *not* a valid separator. Trailing whitespace after
-/// the last image is not an error; trailing *non-whitespace* that does
-/// not begin a valid header is reported as a malformed stream.
+/// The first image starts at byte 0 — the file "is always a two-byte
+/// magic number followed by …" (staged `pbm/README`), so leading
+/// whitespace is a malformed file, exactly as [`crate::probe`] /
+/// [`crate::info`] / [`crate::decode`] treat it (the `multi` fuzz
+/// target pins the agreement). Inter-image ASCII whitespace is skipped
+/// before the next magic is read — the magic must be the first two
+/// bytes of each image, so a `#` between images is *not* a valid
+/// separator. Trailing whitespace after the last image is not an
+/// error; trailing *non-whitespace* that does not begin a valid header
+/// is reported as a malformed stream.
 pub(crate) fn decode_stream(input: &[u8], opts: &DecodeOptions) -> Result<Vec<(PbmImage, Header)>> {
     let mut images = Vec::new();
     let mut offset = 0usize;
     loop {
-        while offset < input.len() && is_ascii_ws(input[offset]) {
-            offset += 1;
-        }
-        if offset >= input.len() {
-            break;
+        if !images.is_empty() {
+            while offset < input.len() && is_ascii_ws(input[offset]) {
+                offset += 1;
+            }
+            if offset >= input.len() {
+                break;
+            }
         }
         let (image, header, consumed) = decode_one(&input[offset..], opts)?;
         images.push((image, header));

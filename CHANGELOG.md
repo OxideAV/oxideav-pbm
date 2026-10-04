@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `decode_all` no longer skips whitespace **before the first image**: a
+  file starts with its two-byte magic (staged `pbm/README`), so a leading
+  newline is `InvalidData` from every entry point (`probe` / `info` /
+  `decode` already said so). Found by the `multi` fuzz target (unit
+  `ClA1MQoxCjIO`: `"\nP51\n1\n2\x0e"` decoded one frame while `info`
+  failed); whitespace between images is still a valid separator.
+
 ### Added
 
 - `encode_all(&[Frame], &EncodeOptions) -> Result<Vec<u8>, Error>`: the
