@@ -27,7 +27,7 @@
 //! represent is fine; a panic is not).
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_pbm::{decode, encode, EncodeOptions, PbmImage, PixelFormat};
+use oxideav_pbm::{EncodeOptions, PbmImage, PixelFormat, decode, encode};
 
 fn select_pixel_format(b: u8) -> PixelFormat {
     PixelFormat::ALL[(b as usize) % PixelFormat::ALL.len()]
@@ -85,5 +85,9 @@ fuzz_target!(|data: &[u8]| {
     // The default flavour must always work for a valid image.
     let natural = encode(&image, &EncodeOptions::default()).expect("natural encode must succeed");
     let back = decode(&natural).expect("natural output must decode");
-    assert_eq!(back.to_rgba8(), image.to_rgba8(), "natural round trip changed pixels");
+    assert_eq!(
+        back.to_rgba8(),
+        image.to_rgba8(),
+        "natural round trip changed pixels"
+    );
 });

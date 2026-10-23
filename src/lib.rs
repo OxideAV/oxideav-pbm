@@ -109,12 +109,12 @@ pub use options::{DecodeOptions, EncodeOptions};
 
 // ---- depth APIs (keep their names) -------------------------------------------
 pub use header::{
-    iter_pnm_header_comments, parse_header, peek_magic, Header, Magic, PfmInfo, PnmHeaderComments,
-    Tupltype,
+    Header, Magic, PfmInfo, PnmHeaderComments, Tupltype, iter_pnm_header_comments, parse_header,
+    peek_magic,
 };
 pub use pfm::{
-    apply_inverse_pfm_scale, apply_pfm_scale, decode_pfm, decode_pfm_consumed, decode_pfm_multi,
-    decode_pfm_scaled, encode_pfm, encode_pfm_plane, encode_pfm_scaled, PfmHeaderInfo,
+    PfmHeaderInfo, apply_inverse_pfm_scale, apply_pfm_scale, decode_pfm, decode_pfm_consumed,
+    decode_pfm_multi, decode_pfm_scaled, encode_pfm, encode_pfm_plane, encode_pfm_scaled,
 };
 
 // ---- deprecated pre-contract entry points (one release) ----------------------
@@ -125,8 +125,8 @@ pub use decoder::{
 };
 #[allow(deprecated)]
 pub use encoder::{
-    encode_pbm, encode_pbm_ascii, encode_pbm_ascii_plane, encode_pbm_plane, encode_pbm_with_format,
-    PbmEncodeFormat,
+    PbmEncodeFormat, encode_pbm, encode_pbm_ascii, encode_pbm_ascii_plane, encode_pbm_plane,
+    encode_pbm_with_format,
 };
 #[allow(deprecated)]
 pub use image::PbmPlane;

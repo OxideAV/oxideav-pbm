@@ -87,7 +87,7 @@ pub fn from_core_pixel_format(f: PixelFormat) -> crate::Result<PbmPixelFormat> {
         other => {
             return Err(PbmError::unsupported(format!(
                 "Netpbm: pixel format {other:?} not representable"
-            )))
+            )));
         }
     })
 }
@@ -260,7 +260,7 @@ impl CodecOptionsStruct for EncodeOptions {
             other => {
                 return Err(oxideav_core::Error::invalid(format!(
                     "Netpbm encoder: unknown option {other:?}"
-                )))
+                )));
             }
         }
         Ok(())
@@ -349,9 +349,11 @@ mod register_tests {
             assert_eq!(PixelFormat::from(f), core);
             assert_eq!(PbmPixelFormat::try_from(core).unwrap(), f);
         }
-        assert!(from_core_pixel_format(PixelFormat::Yuv420P)
-            .unwrap_err()
-            .is_unsupported());
+        assert!(
+            from_core_pixel_format(PixelFormat::Yuv420P)
+                .unwrap_err()
+                .is_unsupported()
+        );
     }
 
     #[test]
@@ -371,18 +373,24 @@ mod register_tests {
         assert_eq!(back2, img);
         // Missing geometry / unsupported layout are crate errors.
         params.pixel_format = Some(PixelFormat::Yuv420P);
-        assert!(PbmImage::from_video_frame(&frame, &params)
-            .unwrap_err()
-            .is_unsupported());
+        assert!(
+            PbmImage::from_video_frame(&frame, &params)
+                .unwrap_err()
+                .is_unsupported()
+        );
         params.pixel_format = None;
-        assert!(PbmImage::from_video_frame(&frame, &params)
-            .unwrap_err()
-            .is_invalid_data());
+        assert!(
+            PbmImage::from_video_frame(&frame, &params)
+                .unwrap_err()
+                .is_invalid_data()
+        );
         params.pixel_format = Some(PixelFormat::Rgba);
         params.width = Some(3);
-        assert!(PbmImage::from_video_frame(&frame, &params)
-            .unwrap_err()
-            .is_invalid_data());
+        assert!(
+            PbmImage::from_video_frame(&frame, &params)
+                .unwrap_err()
+                .is_invalid_data()
+        );
     }
 
     #[test]

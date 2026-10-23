@@ -186,7 +186,7 @@ pub fn encode_binary_body(samples: &[u16], maxval: u32) -> Vec<u8> {
 #[inline]
 fn read_be16_row(src: &[u8], dst: &mut [u16]) {
     debug_assert_eq!(src.len(), dst.len() * 2);
-    for (s, d) in src.chunks_exact(2).zip(dst.iter_mut()) {
+    for (s, d) in src.as_chunks::<2>().0.iter().zip(dst.iter_mut()) {
         *d = u16::from_be_bytes([s[0], s[1]]);
     }
 }
@@ -199,7 +199,7 @@ fn read_be16_row(src: &[u8], dst: &mut [u16]) {
 #[inline]
 fn write_be16_row(src: &[u16], dst: &mut [u8]) {
     debug_assert_eq!(dst.len(), src.len() * 2);
-    for (s, d) in src.iter().zip(dst.chunks_exact_mut(2)) {
+    for (s, d) in src.iter().zip(dst.as_chunks_mut::<2>().0) {
         let b = s.to_be_bytes();
         d[0] = b[0];
         d[1] = b[1];
@@ -263,7 +263,12 @@ pub(crate) fn copy_p4_row_msb(src: &[u8], dst: &mut [u8], width: usize) {
 pub(crate) fn bgra_to_rgba_row(src: &[u8], dst: &mut [u8]) {
     debug_assert_eq!(src.len(), dst.len());
     debug_assert_eq!(src.len() % 4, 0);
-    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+    for (s, d) in src
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<4>().0)
+    {
         d[0] = s[2]; // R ← B-position byte
         d[1] = s[1]; // G stays
         d[2] = s[0]; // B ← R-position byte
@@ -293,7 +298,12 @@ pub(crate) fn bgra_to_rgba_row(src: &[u8], dst: &mut [u8]) {
 pub(crate) fn swap_bytes_u16_row(src: &[u8], dst: &mut [u8]) {
     debug_assert_eq!(src.len(), dst.len());
     debug_assert_eq!(src.len() % 2, 0);
-    for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(2)) {
+    for (s, d) in src
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<2>().0)
+    {
         d[0] = s[1];
         d[1] = s[0];
     }
@@ -319,7 +329,7 @@ mod tests {
         // body.len() must reject before allocating the sample buffer.
         // Pre-fix the `vec![0u16; total_samples]` allocation ran
         // ahead of the body-length check and OOMed on huge headers.
-        use crate::header::{parse_header, Magic};
+        use crate::header::{Magic, parse_header};
         let buf = b"P5\n2 200888808\n255\n\x00\x01\x02\x03";
         let h = parse_header(buf).unwrap();
         assert_eq!(h.magic, Magic::P5BinaryGraymap);
@@ -473,7 +483,12 @@ mod tests {
         let mut got = [0u8; 8];
         swap_bytes_u16_row(&src, &mut got);
         let mut expected = [0u8; 8];
-        for (s, d) in src.chunks_exact(2).zip(expected.chunks_exact_mut(2)) {
+        for (s, d) in src
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(expected.as_chunks_mut::<2>().0)
+        {
             let v = u16::from_le_bytes([s[0], s[1]]).to_be_bytes();
             d.copy_from_slice(&v);
         }
@@ -535,7 +550,7 @@ mod tests {
         let mut fast = vec![0u8; src.len()];
         bgra_to_rgba_row(&src, &mut fast);
         let mut expected: Vec<u8> = Vec::with_capacity(src.len());
-        for px in src.chunks_exact(4) {
+        for px in src.as_chunks::<4>().0 {
             expected.push(px[2]);
             expected.push(px[1]);
             expected.push(px[0]);

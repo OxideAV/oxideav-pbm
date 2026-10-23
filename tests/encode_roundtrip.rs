@@ -3,8 +3,8 @@
 
 #![allow(deprecated)]
 use oxideav_pbm::{
-    decode_pbm, encode_pbm, encode_pbm_ascii, encode_pbm_with_format, PbmEncodeFormat, PbmImage,
-    PbmPixelFormat,
+    PbmEncodeFormat, PbmImage, PbmPixelFormat, decode_pbm, encode_pbm, encode_pbm_ascii,
+    encode_pbm_with_format,
 };
 
 /// Build a deterministic test pattern with `bytes_per_pixel` samples

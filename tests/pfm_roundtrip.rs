@@ -3,8 +3,8 @@
 
 #![allow(deprecated)]
 use oxideav_pbm::{
-    apply_pfm_scale, decode_pbm, decode_pfm, decode_pfm_scaled, encode_pbm, encode_pfm, PbmImage,
-    PbmPixelFormat,
+    PbmImage, PbmPixelFormat, apply_pfm_scale, decode_pbm, decode_pfm, decode_pfm_scaled,
+    encode_pbm, encode_pfm,
 };
 
 /// Build a float image whose samples encode their coordinates so a row
@@ -100,8 +100,10 @@ fn decode_pfm_scaled_folds_header_factor_into_samples() {
 
     for (rc, sc) in raw.planes[0]
         .data
-        .chunks_exact(4)
-        .zip(scaled.planes[0].data.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(scaled.planes[0].data.as_chunks::<4>().0)
     {
         let r = f32::from_le_bytes([rc[0], rc[1], rc[2], rc[3]]);
         let s = f32::from_le_bytes([sc[0], sc[1], sc[2], sc[3]]);

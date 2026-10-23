@@ -31,8 +31,8 @@
 use crate::error::{PbmError as Error, Result};
 
 use crate::ascii::decode_ascii_consumed_opts;
-use crate::binary::{copy_p4_row_msb, decode_binary_opts, swap_bytes_u16_row, DecodedSamples};
-use crate::header::{parse_header, Header, Magic, Tupltype};
+use crate::binary::{DecodedSamples, copy_p4_row_msb, decode_binary_opts, swap_bytes_u16_row};
+use crate::header::{Header, Magic, Tupltype, parse_header};
 use crate::image::{ColorInfo, Metadata, PbmImage, PbmPixelFormat, Plane as PbmPlane};
 use crate::options::DecodeOptions;
 
@@ -785,7 +785,7 @@ fn pick_pixel_format(h: &Header) -> Result<PbmPixelFormat> {
                 (_, d, _) => {
                     return Err(Error::unsupported(format!(
                         "PAM: depth {d} outside the supported 1..=4 range"
-                    )))
+                    )));
                 }
             }
         }
@@ -1196,8 +1196,10 @@ mod tests {
         let mut roundtrip = vec![0u8; body.len()];
         for (s, d) in image.planes[0]
             .data
-            .chunks_exact(2)
-            .zip(roundtrip.chunks_exact_mut(2))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(roundtrip.as_chunks_mut::<2>().0)
         {
             d[0] = s[1];
             d[1] = s[0];
@@ -1226,8 +1228,10 @@ mod tests {
             let mut roundtrip = vec![0u8; body.len()];
             for (s, d) in image.planes[0]
                 .data
-                .chunks_exact(2)
-                .zip(roundtrip.chunks_exact_mut(2))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(roundtrip.as_chunks_mut::<2>().0)
             {
                 d[0] = s[1];
                 d[1] = s[0];

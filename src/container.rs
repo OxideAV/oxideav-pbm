@@ -14,7 +14,7 @@ use oxideav_core::{
     StreamInfo, TimeBase,
 };
 use oxideav_core::{
-    ContainerRegistry, Demuxer, Muxer, ProbeData, ProbeScore, ReadSeek, WriteSeek, MAX_PROBE_SCORE,
+    ContainerRegistry, Demuxer, MAX_PROBE_SCORE, Muxer, ProbeData, ProbeScore, ReadSeek, WriteSeek,
 };
 
 use crate::header::{parse_header, probe_is_netpbm};

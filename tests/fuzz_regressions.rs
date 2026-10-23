@@ -2,7 +2,7 @@
 //! must agree on what is a stream (whenever `decode_all` succeeds,
 //! `info` succeeds and counts the same frames).
 
-use oxideav_pbm::{decode, decode_all, info, probe, Error};
+use oxideav_pbm::{Error, decode, decode_all, info, probe};
 
 /// Fuzz unit `crash-8261079416ab563926cd2db85f329b7e8176f5f1` (Base64
 /// `ClA1MQoxCjIO`): a leading newline, then a valid 1×1 P5 (`maxval`

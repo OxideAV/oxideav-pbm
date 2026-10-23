@@ -30,7 +30,7 @@
 //! The 256 KiB input cap matches the sibling harnesses.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_pbm::{decode, encode, EncodeOptions};
+use oxideav_pbm::{EncodeOptions, decode, encode};
 
 fuzz_target!(|data: &[u8]| {
     if data.len() > 256 * 1024 {
@@ -57,5 +57,8 @@ fuzz_target!(|data: &[u8]| {
     // re-decoded image yields byte-identical output (the true fixed
     // point, not just a stable-ish round trip).
     let encoded2 = encode(&img2, &opts).expect("second re-encode must succeed");
-    assert_eq!(encoded, encoded2, "encoder output not idempotent across recode");
+    assert_eq!(
+        encoded, encoded2,
+        "encoder output not idempotent across recode"
+    );
 });

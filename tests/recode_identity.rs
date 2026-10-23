@@ -25,7 +25,7 @@
 //! covered separately below.
 
 #![allow(deprecated)]
-use oxideav_pbm::{decode_pbm, encode_pbm, PbmImage, PbmPixelFormat};
+use oxideav_pbm::{PbmImage, PbmPixelFormat, decode_pbm, encode_pbm};
 
 /// Minimum (tight) row stride the decoder emits for `(format, width)`.
 fn tight_stride(format: PbmPixelFormat, width: usize) -> usize {
@@ -51,7 +51,7 @@ fn make_image(format: PbmPixelFormat, w: u32, h: u32) -> PbmImage {
     // copied verbatim), but keep the payload finite so the assertion is
     // meaningful rather than accidentally comparing NaN payloads.
     if matches!(format, PbmPixelFormat::GrayF32Le | PbmPixelFormat::RgbF32Le) {
-        for (i, chunk) in data.chunks_exact_mut(4).enumerate() {
+        for (i, chunk) in data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let v = (i as f32) * 0.5 - 3.0;
             chunk.copy_from_slice(&v.to_le_bytes());
         }
@@ -62,7 +62,7 @@ fn make_image(format: PbmPixelFormat, w: u32, h: u32) -> PbmImage {
     // therefore a candidate fixed point — if its pad bits are already
     // zero, so mask them here. (The dirty-pad-bit behaviour is asserted
     // separately in `monoblack_padding_bits_survive_fixed_point`.)
-    if format == PbmPixelFormat::MonoBlack && w % 8 != 0 {
+    if format == PbmPixelFormat::MonoBlack && !w.is_multiple_of(8) {
         let keep = 0xFFu8 << (8 - (w % 8)); // top `w % 8` bits
         for row in data.chunks_exact_mut(stride) {
             if let Some(last) = row.last_mut() {
@@ -143,7 +143,7 @@ fn monoblack_padding_bits_survive_fixed_point() {
     let mut img = make_image(PbmPixelFormat::MonoBlack, 11, 4);
     // Dirty the pad bits deliberately: set every trailing bit in each
     // row's last byte. tight_stride(11) == 2, pixels occupy bits 0..11.
-    for row in img.planes[0].data.chunks_exact_mut(2) {
+    for row in img.planes[0].data.as_chunks_mut::<2>().0 {
         row[1] |= 0b0001_1111; // bits for x=11..15 (pad region)
     }
     let bytes = encode_pbm(&img).unwrap();
@@ -157,8 +157,10 @@ fn monoblack_padding_bits_survive_fixed_point() {
     // And the visible pixels (bits 0..11 of each row) are preserved.
     for (orig, rt) in img.planes[0]
         .data
-        .chunks_exact(2)
-        .zip(back.planes[0].data.chunks_exact(2))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(back.planes[0].data.as_chunks::<2>().0)
     {
         assert_eq!(orig[0], rt[0], "first byte (8 pixels) must match");
         // High 3 bits of the second byte are pixels x=8,9,10.
@@ -190,8 +192,10 @@ fn bgra_input_decodes_back_as_channel_swapped_rgba() {
     assert_eq!(fmt, PbmPixelFormat::Rgba);
     // Each source BGRA quad must reappear as RGBA.
     for (src, rt) in data
-        .chunks_exact(4)
-        .zip(back.planes[0].data.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(back.planes[0].data.as_chunks::<4>().0)
     {
         let (b, g, r, a) = (src[0], src[1], src[2], src[3]);
         assert_eq!(rt, &[r, g, b, a]);

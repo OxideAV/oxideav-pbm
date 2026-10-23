@@ -50,11 +50,11 @@
 //!     cargo bench -p oxideav-pbm --bench encode
 
 #![allow(deprecated)]
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_pbm::{
-    encode_pbm, encode_pbm_ascii, encode_pbm_with_format, encode_pfm, PbmEncodeFormat, PbmImage,
-    PbmPixelFormat,
+    PbmEncodeFormat, PbmImage, PbmPixelFormat, encode_pbm, encode_pbm_ascii,
+    encode_pbm_with_format, encode_pfm,
 };
 
 fn xorshift_byte(state: &mut u32) -> u8 {

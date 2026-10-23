@@ -81,7 +81,7 @@ impl Encoder for PbmEncoder {
             _ => {
                 return Err(oxideav_core::Error::invalid(
                     "PBM encoder: expected video frame",
-                ))
+                ));
             }
         };
         // Thin adapter: rebuild the standalone image from the frame and
@@ -994,7 +994,7 @@ fn emit_ascii_pgm_16(plane: &PbmPlane, w: usize, h: usize) -> Vec<u8> {
     let mut samples: Vec<u16> = Vec::with_capacity(w * h);
     for y in 0..h {
         let row = &plane.data[y * plane.stride..y * plane.stride + w * 2];
-        for px in row.chunks_exact(2) {
+        for px in row.as_chunks::<2>().0 {
             samples.push(u16::from_le_bytes([px[0], px[1]]));
         }
     }
@@ -1010,7 +1010,7 @@ fn emit_ascii_ppm_16(plane: &PbmPlane, w: usize, h: usize) -> Vec<u8> {
     let mut samples: Vec<u16> = Vec::with_capacity(w * h * 3);
     for y in 0..h {
         let row = &plane.data[y * plane.stride..y * plane.stride + w * 6];
-        for px in row.chunks_exact(2) {
+        for px in row.as_chunks::<2>().0 {
             samples.push(u16::from_le_bytes([px[0], px[1]]));
         }
     }
@@ -1314,7 +1314,9 @@ mod tests {
         // Spot-check: 0x1234 LE → 0x12 0x34 on disk.
         assert_eq!(
             pam_body,
-            &[0x12, 0x34, 0x00, 0xff, 0xff, 0x00, 0xca, 0xfe, 0xde, 0xad, 0xbe, 0xef]
+            &[
+                0x12, 0x34, 0x00, 0xff, 0xff, 0x00, 0xca, 0xfe, 0xde, 0xad, 0xbe, 0xef
+            ]
         );
         // The PAM header must declare DEPTH 1 + GRAYSCALE + MAXVAL 65535.
         let hdr_end = pam.iter().position(|&b| b == 0x12).unwrap();

@@ -22,7 +22,7 @@
 //! byte-swaps when the on-disk order is big-endian.
 
 use crate::error::{PbmError as Error, Result};
-use crate::header::{parse_header, Header, Magic, PfmInfo};
+use crate::header::{Header, Magic, PfmInfo, parse_header};
 use crate::image::{PbmImage, PbmPixelFormat, Plane as PbmPlane};
 
 /// Byte order + scale recovered from a decoded Portable FloatMap header.
@@ -275,7 +275,7 @@ pub fn apply_pfm_scale(image: &mut PbmImage, scale: f32) -> Result<()> {
         other => {
             return Err(Error::unsupported(format!(
                 "PFM scale: pixel format {other:?} is not a float map"
-            )))
+            )));
         }
     }
     if !scale.is_finite() {
@@ -285,7 +285,7 @@ pub fn apply_pfm_scale(image: &mut PbmImage, scale: f32) -> Result<()> {
         return Ok(());
     }
     for plane in &mut image.planes {
-        for sample in plane.data.chunks_exact_mut(4) {
+        for sample in plane.data.as_chunks_mut::<4>().0 {
             let v = f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
             sample.copy_from_slice(&(v * scale).to_le_bytes());
         }
@@ -317,7 +317,7 @@ pub fn apply_inverse_pfm_scale(image: &mut PbmImage, scale: f32) -> Result<()> {
         other => {
             return Err(Error::unsupported(format!(
                 "PFM inverse scale: pixel format {other:?} is not a float map"
-            )))
+            )));
         }
     }
     if !scale.is_finite() {
@@ -330,7 +330,7 @@ pub fn apply_inverse_pfm_scale(image: &mut PbmImage, scale: f32) -> Result<()> {
         return Ok(());
     }
     for plane in &mut image.planes {
-        for sample in plane.data.chunks_exact_mut(4) {
+        for sample in plane.data.as_chunks_mut::<4>().0 {
             let v = f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
             sample.copy_from_slice(&(v / scale).to_le_bytes());
         }
@@ -361,7 +361,7 @@ pub fn encode_pfm_scaled(image: &PbmImage, little_endian: bool, scale: f32) -> R
         other => {
             return Err(Error::unsupported(format!(
                 "PFM encoder: pixel format {other:?} is not a float map"
-            )))
+            )));
         }
     }
     if !scale.is_finite() || scale == 0.0 {
@@ -415,7 +415,7 @@ pub fn encode_pfm_plane(
         other => {
             return Err(Error::unsupported(format!(
                 "PFM encoder: pixel format {other:?} is not a float map"
-            )))
+            )));
         }
     };
     if !scale.is_finite() || scale == 0.0 {
@@ -491,7 +491,12 @@ pub fn encode_pfm_plane(
 fn swap_bytes_u32_row(src: &[u8], dst: &mut [u8]) {
     debug_assert_eq!(src.len(), dst.len());
     debug_assert_eq!(src.len() % 4, 0);
-    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+    for (s, d) in src
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<4>().0)
+    {
         let v = u32::from_le_bytes([s[0], s[1], s[2], s[3]]).swap_bytes();
         d.copy_from_slice(&v.to_le_bytes());
     }
@@ -647,11 +652,13 @@ mod tests {
         // Snapshot the unscaled samples so we can compare against ×2.5.
         let before: Vec<f32> = img.planes[0]
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         apply_pfm_scale(&mut img, 2.5).unwrap();
-        for (i, c) in img.planes[0].data.chunks_exact(4).enumerate() {
+        for (i, c) in img.planes[0].data.as_chunks::<4>().0.iter().enumerate() {
             let got = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
             assert_eq!(got, before[i] * 2.5, "sample {i}");
         }
@@ -682,11 +689,13 @@ mod tests {
         let mut img = float_image(3, 2, 3);
         let before: Vec<f32> = img.planes[0]
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         apply_inverse_pfm_scale(&mut img, 2.5).unwrap();
-        for (i, c) in img.planes[0].data.chunks_exact(4).enumerate() {
+        for (i, c) in img.planes[0].data.as_chunks::<4>().0.iter().enumerate() {
             let got = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
             assert_eq!(got, before[i] / 2.5, "sample {i}");
         }
@@ -762,19 +771,21 @@ mod tests {
         let img = float_image(4, 3, 3);
         let linear: Vec<f32> = img.planes[0]
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         let bytes = encode_pfm_scaled(&img, true, 2.0).unwrap();
         // On disk the samples are L/2; reading-with-scale multiplies back.
         let (raw, _) = decode_pfm(&bytes).unwrap();
-        for (i, c) in raw.planes[0].data.chunks_exact(4).enumerate() {
+        for (i, c) in raw.planes[0].data.as_chunks::<4>().0.iter().enumerate() {
             let stored = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
             assert_eq!(stored, linear[i] / 2.0, "stored sample {i}");
         }
         let (scaled, info) = decode_pfm_scaled(&bytes).unwrap();
         assert_eq!(info.scale, 2.0);
-        for (i, c) in scaled.planes[0].data.chunks_exact(4).enumerate() {
+        for (i, c) in scaled.planes[0].data.as_chunks::<4>().0.iter().enumerate() {
             let recovered = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
             assert_eq!(recovered, linear[i], "recovered linear sample {i}");
         }
@@ -805,8 +816,10 @@ mod tests {
         assert_eq!(info.scale, 3.0);
         for (rc, sc) in raw.planes[0]
             .data
-            .chunks_exact(4)
-            .zip(scaled.planes[0].data.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(scaled.planes[0].data.as_chunks::<4>().0)
         {
             let r = f32::from_le_bytes([rc[0], rc[1], rc[2], rc[3]]);
             let s = f32::from_le_bytes([sc[0], sc[1], sc[2], sc[3]]);

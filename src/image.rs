@@ -725,7 +725,12 @@ impl PbmImage {
             };
             rgba_row(self.format, row, &mut tmp, w);
             let dst = &mut out[y * w * 3..(y + 1) * w * 3];
-            for (s, d) in tmp.chunks_exact(4).zip(dst.chunks_exact_mut(3)) {
+            for (s, d) in tmp
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(dst.as_chunks_mut::<3>().0)
+            {
                 d.copy_from_slice(&s[..3]);
             }
         }
@@ -766,7 +771,7 @@ fn rgba_row(format: PixelFormat, row: &[u8], dst: &mut [u8], w: usize) {
     match format {
         PixelFormat::MonoBlack | PixelFormat::MonoWhite => {
             let one_is_black = format == PixelFormat::MonoBlack;
-            for (x, px) in dst.chunks_exact_mut(4).enumerate().take(w) {
+            for (x, px) in dst.as_chunks_mut::<4>().0.iter_mut().enumerate().take(w) {
                 let bit = (row[x / 8] >> (7 - (x % 8))) & 1 == 1;
                 let v = if bit == one_is_black { 0 } else { 255 };
                 px[0] = v;
@@ -776,7 +781,7 @@ fn rgba_row(format: PixelFormat, row: &[u8], dst: &mut [u8], w: usize) {
             }
         }
         PixelFormat::Gray8 => {
-            for (s, px) in row.iter().zip(dst.chunks_exact_mut(4)) {
+            for (s, px) in row.iter().zip(dst.as_chunks_mut::<4>().0) {
                 px[0] = *s;
                 px[1] = *s;
                 px[2] = *s;
@@ -784,7 +789,12 @@ fn rgba_row(format: PixelFormat, row: &[u8], dst: &mut [u8], w: usize) {
             }
         }
         PixelFormat::Gray16Le => {
-            for (s, px) in row.chunks_exact(2).zip(dst.chunks_exact_mut(4)) {
+            for (s, px) in row
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(dst.as_chunks_mut::<4>().0)
+            {
                 let g = scale16_to_u8(le16(s));
                 px[0] = g;
                 px[1] = g;
@@ -793,7 +803,12 @@ fn rgba_row(format: PixelFormat, row: &[u8], dst: &mut [u8], w: usize) {
             }
         }
         PixelFormat::Ya8 => {
-            for (s, px) in row.chunks_exact(2).zip(dst.chunks_exact_mut(4)) {
+            for (s, px) in row
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(dst.as_chunks_mut::<4>().0)
+            {
                 px[0] = s[0];
                 px[1] = s[0];
                 px[2] = s[0];
@@ -801,7 +816,12 @@ fn rgba_row(format: PixelFormat, row: &[u8], dst: &mut [u8], w: usize) {
             }
         }
         PixelFormat::Ya16Le => {
-            for (s, px) in row.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+            for (s, px) in row
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(dst.as_chunks_mut::<4>().0)
+            {
                 let g = scale16_to_u8(le16(&s[0..2]));
                 px[0] = g;
                 px[1] = g;
@@ -810,13 +830,23 @@ fn rgba_row(format: PixelFormat, row: &[u8], dst: &mut [u8], w: usize) {
             }
         }
         PixelFormat::Rgb24 => {
-            for (s, px) in row.chunks_exact(3).zip(dst.chunks_exact_mut(4)) {
+            for (s, px) in row
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(dst.as_chunks_mut::<4>().0)
+            {
                 px[..3].copy_from_slice(s);
                 px[3] = 255;
             }
         }
         PixelFormat::Rgb48Le => {
-            for (s, px) in row.chunks_exact(6).zip(dst.chunks_exact_mut(4)) {
+            for (s, px) in row
+                .as_chunks::<6>()
+                .0
+                .iter()
+                .zip(dst.as_chunks_mut::<4>().0)
+            {
                 px[0] = scale16_to_u8(le16(&s[0..2]));
                 px[1] = scale16_to_u8(le16(&s[2..4]));
                 px[2] = scale16_to_u8(le16(&s[4..6]));
@@ -827,7 +857,12 @@ fn rgba_row(format: PixelFormat, row: &[u8], dst: &mut [u8], w: usize) {
             dst[..w * 4].copy_from_slice(&row[..w * 4]);
         }
         PixelFormat::Bgra => {
-            for (s, px) in row.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+            for (s, px) in row
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(dst.as_chunks_mut::<4>().0)
+            {
                 px[0] = s[2];
                 px[1] = s[1];
                 px[2] = s[0];
@@ -835,7 +870,12 @@ fn rgba_row(format: PixelFormat, row: &[u8], dst: &mut [u8], w: usize) {
             }
         }
         PixelFormat::Rgba64Le => {
-            for (s, px) in row.chunks_exact(8).zip(dst.chunks_exact_mut(4)) {
+            for (s, px) in row
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .zip(dst.as_chunks_mut::<4>().0)
+            {
                 px[0] = scale16_to_u8(le16(&s[0..2]));
                 px[1] = scale16_to_u8(le16(&s[2..4]));
                 px[2] = scale16_to_u8(le16(&s[4..6]));
@@ -843,7 +883,12 @@ fn rgba_row(format: PixelFormat, row: &[u8], dst: &mut [u8], w: usize) {
             }
         }
         PixelFormat::GrayF32Le => {
-            for (s, px) in row.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+            for (s, px) in row
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(dst.as_chunks_mut::<4>().0)
+            {
                 let g = float_to_u8(lef32(s));
                 px[0] = g;
                 px[1] = g;
@@ -852,7 +897,12 @@ fn rgba_row(format: PixelFormat, row: &[u8], dst: &mut [u8], w: usize) {
             }
         }
         PixelFormat::RgbF32Le => {
-            for (s, px) in row.chunks_exact(12).zip(dst.chunks_exact_mut(4)) {
+            for (s, px) in row
+                .as_chunks::<12>()
+                .0
+                .iter()
+                .zip(dst.as_chunks_mut::<4>().0)
+            {
                 px[0] = float_to_u8(lef32(&s[0..4]));
                 px[1] = float_to_u8(lef32(&s[4..8]));
                 px[2] = float_to_u8(lef32(&s[8..12]));
@@ -1100,13 +1150,15 @@ mod tests {
         assert!(PbmImage::packed(0, 1, PixelFormat::Gray8, 0, vec![]).is_err());
         // Wrong plane count.
         assert!(PbmImage::new(2, 1, PixelFormat::Gray8, vec![]).is_err());
-        assert!(PbmImage::new(
-            2,
-            1,
-            PixelFormat::Gray8,
-            vec![Plane::new(2, vec![0; 2]), Plane::new(2, vec![0; 2])]
-        )
-        .is_err());
+        assert!(
+            PbmImage::new(
+                2,
+                1,
+                PixelFormat::Gray8,
+                vec![Plane::new(2, vec![0; 2]), Plane::new(2, vec![0; 2])]
+            )
+            .is_err()
+        );
         // from_rgb8 / from_rgba8 lengths.
         assert!(PbmImage::from_rgb8(2, 2, vec![0; 11]).is_err());
         assert!(PbmImage::from_rgb8(2, 2, vec![0; 12]).is_ok());
@@ -1178,7 +1230,11 @@ mod tests {
         let gf = PbmImage::packed(6, 1, PixelFormat::GrayF32Le, 24, fdata.clone()).unwrap();
         let rgb = gf.to_rgb8();
         assert_eq!(
-            rgb.chunks_exact(3).map(|p| p[0]).collect::<Vec<_>>(),
+            rgb.as_chunks::<3>()
+                .0
+                .iter()
+                .map(|p| p[0])
+                .collect::<Vec<_>>(),
             vec![0, 128, 255, 255, 0, 0]
         );
         let rf = PbmImage::packed(2, 1, PixelFormat::RgbF32Le, 24, fdata).unwrap();

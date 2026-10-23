@@ -13,7 +13,7 @@
 //! truncation / missing-separator shapes.
 
 #![allow(deprecated)]
-use oxideav_pbm::{decode_pbm, parse_header, PbmError};
+use oxideav_pbm::{PbmError, decode_pbm, parse_header};
 
 /// Assert `decode_pbm(buf)` fails with `InvalidData` whose message
 /// mentions `needle` — never panics, never returns `Ok`.

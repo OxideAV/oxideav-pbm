@@ -9,9 +9,9 @@
 
 #![allow(deprecated)]
 use oxideav_pbm::{
-    decode_pbm, decode_pbm_consumed, decode_pbm_header_consumed, decode_pbm_multi,
-    decode_pbm_multi_with_headers, encode_pbm, encode_pbm_ascii, encode_pfm, Magic, PbmImage,
-    PbmPixelFormat, Tupltype,
+    Magic, PbmImage, PbmPixelFormat, Tupltype, decode_pbm, decode_pbm_consumed,
+    decode_pbm_header_consumed, decode_pbm_multi, decode_pbm_multi_with_headers, encode_pbm,
+    encode_pbm_ascii, encode_pfm,
 };
 
 fn gray8(w: u32, h: u32, seed: u8) -> PbmImage {

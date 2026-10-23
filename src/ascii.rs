@@ -80,7 +80,7 @@ pub fn decode_ascii_consumed_opts(
                     _ => {
                         return Err(Error::invalid(format!(
                             "PBM ASCII: expected '0'/'1', got {c:#x}"
-                        )))
+                        )));
                     }
                 };
                 out.push(bit);

@@ -7,10 +7,10 @@
 //! delegating to the same functions.
 
 use oxideav_pbm::{
-    decode, decode_all, decode_from, decode_rgb8, decode_rgba8, decode_with, encode, encode_all,
-    encode_rgb8, encode_rgba8, encode_to, info, probe, ColorInfo, ColorRange, DecodeOptions,
-    EncodeOptions, Error, Frame, ImageInfo, Metadata, PbmImage, PixelFormat, Plane, RgbImage,
-    RgbaImage,
+    ColorInfo, ColorRange, DecodeOptions, EncodeOptions, Error, Frame, ImageInfo, Metadata,
+    PbmImage, PixelFormat, Plane, RgbImage, RgbaImage, decode, decode_all, decode_from,
+    decode_rgb8, decode_rgba8, decode_with, encode, encode_all, encode_rgb8, encode_rgba8,
+    encode_to, info, probe,
 };
 
 fn checker(w: u32, h: u32) -> Vec<u8> {
@@ -355,8 +355,8 @@ fn colour_is_the_documented_default() {
 #[allow(deprecated)]
 fn deprecated_wrappers_still_work() {
     use oxideav_pbm::{
-        decode_pbm, decode_pbm_consumed, decode_pbm_multi, encode_pbm, encode_pbm_ascii,
-        encode_pbm_with_format, probe_is_netpbm, PbmEncodeFormat, PbmPixelFormat, PbmPlane,
+        PbmEncodeFormat, PbmPixelFormat, PbmPlane, decode_pbm, decode_pbm_consumed,
+        decode_pbm_multi, encode_pbm, encode_pbm_ascii, encode_pbm_with_format, probe_is_netpbm,
     };
     let plane: PbmPlane = Plane::new(3, vec![1, 2, 3]);
     let img = PbmImage::new(1, 1, PbmPixelFormat::Rgb24, vec![plane]).unwrap();

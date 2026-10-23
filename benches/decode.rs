@@ -52,11 +52,11 @@
 //!     cargo bench -p oxideav-pbm --bench decode
 
 #![allow(deprecated)]
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_pbm::{
-    decode_pbm, encode_pbm, encode_pbm_ascii, encode_pbm_with_format, encode_pfm, PbmEncodeFormat,
-    PbmImage, PbmPixelFormat,
+    PbmEncodeFormat, PbmImage, PbmPixelFormat, decode_pbm, encode_pbm, encode_pbm_ascii,
+    encode_pbm_with_format, encode_pfm,
 };
 
 /// xorshift32 — keeps the bench input from being trivially compressible

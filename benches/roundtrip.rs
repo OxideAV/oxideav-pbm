@@ -31,9 +31,9 @@
 //!     cargo bench -p oxideav-pbm --bench roundtrip
 
 #![allow(deprecated)]
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use oxideav_pbm::{decode_pbm, decode_pfm, encode_pbm, encode_pfm, PbmImage, PbmPixelFormat};
+use oxideav_pbm::{PbmImage, PbmPixelFormat, decode_pbm, decode_pfm, encode_pbm, encode_pfm};
 
 fn xorshift_byte(state: &mut u32) -> u8 {
     *state ^= *state << 13;

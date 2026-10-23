@@ -631,14 +631,14 @@ fn parse_pam_header(input: &[u8]) -> Result<Header> {
         // Only the six standard tuple-types pin a channel count. A
         // user-defined `Custom(_)` name is honoured at whatever `DEPTH`
         // the header advertises (1..=4, already range-checked above).
-        if let Some(want) = t.channels() {
-            if want as u32 != depth {
-                return Err(Error::invalid(format!(
-                    "PAM: TUPLTYPE {} expects depth {}, header says {depth}",
-                    t.name(),
-                    want
-                )));
-            }
+        if let Some(want) = t.channels()
+            && want as u32 != depth
+        {
+            return Err(Error::invalid(format!(
+                "PAM: TUPLTYPE {} expects depth {}, header says {depth}",
+                t.name(),
+                want
+            )));
         }
     }
     Ok(Header {
@@ -716,12 +716,12 @@ fn read_pfm_line<'a>(input: &'a [u8], cursor: &mut usize) -> Result<&'a [u8]> {
             b'\r' => {
                 return Err(Error::invalid(
                     "PFM: carriage return in header (CRLF line endings are not allowed)",
-                ))
+                ));
             }
             b'#' => {
                 return Err(Error::invalid(
                     "PFM: '#' in header (comments are not allowed)",
-                ))
+                ));
             }
             _ => *cursor += 1,
         }
@@ -1368,13 +1368,13 @@ mod tests {
     fn body_byte_len_pfm_counts_float_raster() {
         // PF RGB 4x3: 4 * 3 * 3 channels * 4 bytes = 144 bytes.
         let mut buf = b"PF\n4 3\n-1.0\n".to_vec();
-        buf.extend(std::iter::repeat(0u8).take(144));
+        buf.extend(std::iter::repeat_n(0u8, 144));
         let h = parse_header(&buf).unwrap();
         assert!(!h.is_ascii_body());
         assert_eq!(h.body_byte_len().unwrap(), Some(144));
         // Pf gray 2x2: 2 * 2 * 1 * 4 = 16 bytes.
         let mut g = b"Pf\n2 2\n1.0\n".to_vec();
-        g.extend(std::iter::repeat(0u8).take(16));
+        g.extend(std::iter::repeat_n(0u8, 16));
         let hg = parse_header(&g).unwrap();
         assert_eq!(hg.body_byte_len().unwrap(), Some(16));
     }

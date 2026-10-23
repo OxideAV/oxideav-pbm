@@ -16,7 +16,7 @@
 //! than any plausible image header.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_pbm::{decode, decode_rgb8, decode_rgba8, decode_with, info, probe, DecodeOptions};
+use oxideav_pbm::{DecodeOptions, decode, decode_rgb8, decode_rgba8, decode_with, info, probe};
 
 fuzz_target!(|data: &[u8]| {
     if data.len() > 256 * 1024 {

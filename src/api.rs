@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use crate::decoder::{decode_one, decode_stream, is_ascii_ws, native_format};
 use crate::encoder::encode_image;
 use crate::error::{PbmError as Error, Result};
-use crate::header::{parse_header, probe_is_netpbm, Header};
+use crate::header::{Header, parse_header, probe_is_netpbm};
 use crate::image::{ColorInfo, Frame, ImageInfo, PbmImage, RgbImage, RgbaImage};
 use crate::options::{DecodeOptions, EncodeOptions};
 
@@ -333,9 +333,11 @@ mod tests {
         let e = decode_with(hostile, &DecodeOptions::new().unlimited()).unwrap_err();
         assert!(e.is_invalid_data(), "{e}");
         let small = b"P5\n4 4\n255\n0123456789abcdef";
-        assert!(decode_with(small, &DecodeOptions::new().with_max_width(3))
-            .unwrap_err()
-            .is_limit_exceeded());
+        assert!(
+            decode_with(small, &DecodeOptions::new().with_max_width(3))
+                .unwrap_err()
+                .is_limit_exceeded()
+        );
         assert!(
             decode_with(small, &DecodeOptions::new().with_max_pixels(15u64))
                 .unwrap_err()
@@ -361,11 +363,13 @@ mod tests {
         assert_eq!(decode(binary).unwrap().as_bytes().unwrap(), &[128, 255]);
         assert!(decode_with(binary, &DecodeOptions::new().with_strict(true)).is_err());
         // Natural maxval: nothing to be strict about.
-        assert!(decode_with(
-            b"P5\n1 1\n255\n\xff",
-            &DecodeOptions::new().with_strict(true)
-        )
-        .is_ok());
+        assert!(
+            decode_with(
+                b"P5\n1 1\n255\n\xff",
+                &DecodeOptions::new().with_strict(true)
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -394,9 +398,11 @@ mod tests {
         assert_eq!(decode(&p6).unwrap().format, PixelFormat::Rgb24);
         assert_eq!(decode(&p7).unwrap().format, PixelFormat::Rgba);
         // Length mismatches are errors, not panics.
-        assert!(encode_rgb8(2, 1, &[1, 2, 3], &o)
-            .unwrap_err()
-            .is_invalid_data());
+        assert!(
+            encode_rgb8(2, 1, &[1, 2, 3], &o)
+                .unwrap_err()
+                .is_invalid_data()
+        );
         assert!(encode_rgba8(0, 1, &[], &o).is_err());
         // The plain forms have no alpha.
         assert!(
@@ -426,9 +432,11 @@ mod tests {
                 Ok(())
             }
         }
-        assert!(encode_to(&img, &EncodeOptions::default(), Broken)
-            .unwrap_err()
-            .is_io());
+        assert!(
+            encode_to(&img, &EncodeOptions::default(), Broken)
+                .unwrap_err()
+                .is_io()
+        );
     }
 
     #[test]
@@ -554,9 +562,11 @@ mod tests {
     fn encode_rejects_a_mutated_inconsistent_image() {
         let mut img = PbmImage::from_rgb8(2, 2, vec![0; 12]).unwrap();
         img.planes[0].data.truncate(5);
-        assert!(encode(&img, &EncodeOptions::default())
-            .unwrap_err()
-            .is_invalid_data());
+        assert!(
+            encode(&img, &EncodeOptions::default())
+                .unwrap_err()
+                .is_invalid_data()
+        );
     }
 
     #[test]

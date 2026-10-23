@@ -9,7 +9,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use oxideav_pbm::{decode_pbm, encode_pbm, PbmImage, PbmPixelFormat};
+use oxideav_pbm::{PbmImage, PbmPixelFormat, decode_pbm, encode_pbm};
 
 fn have(prog: &str) -> bool {
     Command::new(prog)

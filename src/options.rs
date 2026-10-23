@@ -90,34 +90,34 @@ impl DecodeOptions {
     /// Check a header's geometry against the limits. `bytes` is the
     /// decoded plane size the native layout implies.
     pub(crate) fn check(&self, width: u32, height: u32, bytes: u64) -> Result<()> {
-        if let Some(m) = self.max_width {
-            if width > m {
-                return Err(PbmError::limit(format!(
-                    "Netpbm: width {width} exceeds max_width {m}"
-                )));
-            }
+        if let Some(m) = self.max_width
+            && width > m
+        {
+            return Err(PbmError::limit(format!(
+                "Netpbm: width {width} exceeds max_width {m}"
+            )));
         }
-        if let Some(m) = self.max_height {
-            if height > m {
-                return Err(PbmError::limit(format!(
-                    "Netpbm: height {height} exceeds max_height {m}"
-                )));
-            }
+        if let Some(m) = self.max_height
+            && height > m
+        {
+            return Err(PbmError::limit(format!(
+                "Netpbm: height {height} exceeds max_height {m}"
+            )));
         }
         let pixels = u64::from(width) * u64::from(height);
-        if let Some(m) = self.max_pixels {
-            if pixels > m {
-                return Err(PbmError::limit(format!(
-                    "Netpbm: {pixels} pixels exceed max_pixels {m}"
-                )));
-            }
+        if let Some(m) = self.max_pixels
+            && pixels > m
+        {
+            return Err(PbmError::limit(format!(
+                "Netpbm: {pixels} pixels exceed max_pixels {m}"
+            )));
         }
-        if let Some(m) = self.max_bytes {
-            if bytes > m {
-                return Err(PbmError::limit(format!(
-                    "Netpbm: decoded plane of {bytes} bytes exceeds max_bytes {m}"
-                )));
-            }
+        if let Some(m) = self.max_bytes
+            && bytes > m
+        {
+            return Err(PbmError::limit(format!(
+                "Netpbm: decoded plane of {bytes} bytes exceeds max_bytes {m}"
+            )));
         }
         Ok(())
     }
@@ -228,19 +228,19 @@ impl EncodeOptions {
                 "Netpbm encoder: PAM (P7) has no plain-text form; `ascii` cannot be combined with `pam` / `tupltype`",
             ));
         }
-        if let Some(mv) = self.maxval {
-            if !(1..=65535).contains(&mv) {
-                return Err(PbmError::invalid(format!(
-                    "Netpbm encoder: maxval {mv} outside 1..=65535"
-                )));
-            }
+        if let Some(mv) = self.maxval
+            && !(1..=65535).contains(&mv)
+        {
+            return Err(PbmError::invalid(format!(
+                "Netpbm encoder: maxval {mv} outside 1..=65535"
+            )));
         }
-        if let Some(t) = &self.tupltype {
-            if t.is_empty() || t.bytes().any(|b| b.is_ascii_whitespace() || b == b'#') {
-                return Err(PbmError::invalid(
-                    "Netpbm encoder: TUPLTYPE must be a non-empty token without whitespace or '#'",
-                ));
-            }
+        if let Some(t) = &self.tupltype
+            && (t.is_empty() || t.bytes().any(|b| b.is_ascii_whitespace() || b == b'#'))
+        {
+            return Err(PbmError::invalid(
+                "Netpbm encoder: TUPLTYPE must be a non-empty token without whitespace or '#'",
+            ));
         }
         if !self.pfm_scale.is_finite() || self.pfm_scale == 0.0 {
             return Err(PbmError::invalid(
@@ -279,61 +279,81 @@ mod tests {
         let u = d.clone().unlimited();
         assert_eq!(u.max_bytes, None);
         assert!(d.check(10, 10, 300).is_ok());
-        assert!(DecodeOptions::new()
-            .with_max_width(4)
-            .check(5, 1, 5)
-            .unwrap_err()
-            .is_limit_exceeded());
-        assert!(DecodeOptions::new()
-            .with_max_height(4)
-            .check(1, 5, 5)
-            .is_err());
-        assert!(DecodeOptions::new()
-            .with_max_pixels(10u64)
-            .check(4, 4, 16)
-            .is_err());
-        assert!(DecodeOptions::new()
-            .with_max_bytes(10u64)
-            .check(4, 4, 16)
-            .is_err());
+        assert!(
+            DecodeOptions::new()
+                .with_max_width(4)
+                .check(5, 1, 5)
+                .unwrap_err()
+                .is_limit_exceeded()
+        );
+        assert!(
+            DecodeOptions::new()
+                .with_max_height(4)
+                .check(1, 5, 5)
+                .is_err()
+        );
+        assert!(
+            DecodeOptions::new()
+                .with_max_pixels(10u64)
+                .check(4, 4, 16)
+                .is_err()
+        );
+        assert!(
+            DecodeOptions::new()
+                .with_max_bytes(10u64)
+                .check(4, 4, 16)
+                .is_err()
+        );
     }
 
     #[test]
     fn encode_option_combinations_are_validated() {
         assert!(EncodeOptions::default().validate().is_ok());
-        assert!(EncodeOptions::new()
-            .with_ascii(true)
-            .with_pam(true)
-            .validate()
-            .unwrap_err()
-            .is_unsupported());
-        assert!(EncodeOptions::new()
-            .with_ascii(true)
-            .with_tupltype("X".to_string())
-            .validate()
-            .is_err());
+        assert!(
+            EncodeOptions::new()
+                .with_ascii(true)
+                .with_pam(true)
+                .validate()
+                .unwrap_err()
+                .is_unsupported()
+        );
+        assert!(
+            EncodeOptions::new()
+                .with_ascii(true)
+                .with_tupltype("X".to_string())
+                .validate()
+                .is_err()
+        );
         assert!(EncodeOptions::new().with_maxval(0).validate().is_err());
         assert!(EncodeOptions::new().with_maxval(70000).validate().is_err());
-        assert!(EncodeOptions::new()
-            .with_tupltype("HAS SPACE".to_string())
-            .validate()
-            .is_err());
-        assert!(EncodeOptions::new()
-            .with_tupltype(String::new())
-            .validate()
-            .is_err());
+        assert!(
+            EncodeOptions::new()
+                .with_tupltype("HAS SPACE".to_string())
+                .validate()
+                .is_err()
+        );
+        assert!(
+            EncodeOptions::new()
+                .with_tupltype(String::new())
+                .validate()
+                .is_err()
+        );
         assert!(EncodeOptions::new().with_pfm_scale(0.0).validate().is_err());
-        assert!(EncodeOptions::new()
-            .with_pfm_scale(f32::NAN)
-            .validate()
-            .is_err());
-        assert!(EncodeOptions::new()
-            .with_pam(true)
-            .with_maxval(1000)
-            .with_tupltype("MY_TYPE".to_string())
-            .with_pfm_little_endian(false)
-            .with_pfm_scale(2.0)
-            .validate()
-            .is_ok());
+        assert!(
+            EncodeOptions::new()
+                .with_pfm_scale(f32::NAN)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            EncodeOptions::new()
+                .with_pam(true)
+                .with_maxval(1000)
+                .with_tupltype("MY_TYPE".to_string())
+                .with_pfm_little_endian(false)
+                .with_pfm_scale(2.0)
+                .validate()
+                .is_ok()
+        );
     }
 }
