@@ -31,6 +31,7 @@ use crate::image::{PbmImage, PbmPixelFormat, Plane as PbmPlane};
 /// is the producer's advisory factor (the absolute value of the header's
 /// third line), reported as metadata rather than applied to the pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct PfmHeaderInfo {
     /// `true` when the on-disk samples were little-endian.
     pub little_endian: bool,
@@ -39,6 +40,17 @@ pub struct PfmHeaderInfo {
     pub scale: f32,
     /// Channels per pixel: 1 for `Pf`, 3 for `PF`.
     pub channels: u32,
+}
+
+impl PfmHeaderInfo {
+    /// Build a [`PfmHeaderInfo`] from every field.
+    pub fn new(little_endian: bool, scale: f32, channels: u32) -> Self {
+        Self {
+            little_endian,
+            scale,
+            channels,
+        }
+    }
 }
 
 /// Decode a complete Portable FloatMap file into a [`PbmImage`] plus the

@@ -24,6 +24,7 @@ use crate::error::{PbmError as Error, Result};
 
 /// One of the seven Netpbm magic numbers, plus PAM (P7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Magic {
     /// `P1` — ASCII PBM (1 bit, 1 = black).
     P1AsciiBitmap,
@@ -156,6 +157,7 @@ impl Magic {
 /// count is whatever the header's `DEPTH` says (1..=4) and the decoder
 /// falls back to opaque-gray / gray-alpha / RGB / RGBA based on that.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Tupltype {
     BlackAndWhite,
     Grayscale,
@@ -226,6 +228,7 @@ impl Tupltype {
 /// magics. The third PFM header line carries both the byte order (via its
 /// sign) and an application-defined scale factor (its absolute value).
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct PfmInfo {
     /// `true` when the on-disk float samples are little-endian (the
     /// header's scale line was negative); `false` for big-endian (a
@@ -238,9 +241,20 @@ pub struct PfmInfo {
     pub scale: f32,
 }
 
+impl PfmInfo {
+    /// Build a [`PfmInfo`] from every field.
+    pub fn new(little_endian: bool, scale: f32) -> Self {
+        Self {
+            little_endian,
+            scale,
+        }
+    }
+}
+
 /// Parsed header — common across all seven Netpbm magic numbers plus the
 /// two Portable FloatMap magics.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Header {
     pub magic: Magic,
     pub width: u32,

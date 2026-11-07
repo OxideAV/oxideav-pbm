@@ -7,8 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `PfmInfo::new(little_endian, scale)` and `PfmHeaderInfo::new(little_endian, scale, channels)`.
+
 ### Changed
 
+- API hygiene: `header::Magic`, `header::Tupltype`, `header::PfmInfo`,
+  `header::Header` and `pfm::PfmHeaderInfo` are now `#[non_exhaustive]`
+  (match the enums with a `_` arm). The deprecated `PbmEncodeFormat`
+  is unchanged.
 - edition 2024, MSRV 1.95
 
 ## [0.0.5](https://github.com/OxideAV/oxideav-pbm/compare/v0.0.4...v0.0.5) - 2026-10-04
