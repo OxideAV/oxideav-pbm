@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/OxideAV/oxideav-pbm/compare/v0.0.5...v0.0.6) - 2026-11-07
+
+### Other
+
+- API hygiene: non_exhaustive Magic / Tupltype + header records
+- edition 2024, MSRV 1.95
+
 ### Added
 
 - `PfmInfo::new(little_endian, scale)` and `PfmHeaderInfo::new(little_endian, scale, channels)`.
